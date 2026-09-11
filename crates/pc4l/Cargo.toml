@@ -1,0 +1,18 @@
+[package]
+name = "pc4l"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI: stream an Android phone's camera to a Linux V4L2 device"
+
+[[bin]]
+name = "pc4l"
+path = "src/main.rs"
+
+[dependencies]
+phone-cam4linux = { path = "../../phone-cam4linux" }
+anyhow.workspace = true
+clap.workspace = true
+log.workspace = true
+env_logger.workspace = true
