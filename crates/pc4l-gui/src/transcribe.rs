@@ -299,11 +299,16 @@ impl PromptsConfig {
 pub struct UiConfig {
     /// Everything in the window scaled by this (1.0 = the desktop's own size).
     pub scale: f32,
+    /// The readings' text size in points (scaled by `scale` like everything else).
+    pub reading_size: f32,
 }
 
 impl Default for UiConfig {
     fn default() -> Self {
-        Self { scale: 1.0 }
+        Self {
+            scale: 1.0,
+            reading_size: 20.0,
+        }
     }
 }
 

@@ -146,7 +146,10 @@ always copies the raw text, and anything that does not convert stays text. Every
 reading of the session is kept: **history** (`H`) lists them all with the capture they
 came from, **copy all** puts the current list on the clipboard in page order, and
 **Save as Markdown** writes the session to `~/Pictures/pc4l/pc4l-readings-<time>.md`,
-a section per capture. (The
+a section per capture. **2nd opinion** (`shift+enter`) reads the same thing again with
+the next backend in the list and lists it alongside -- the two are never merged. The
+readings' text size is a Settings value (`[ui] reading_size`, points) and scales with
+the window. (The
 `math` cargo feature, on by default; about 40 MB of the binary.) Backends live in
 `~/.config/pc4l/gui.toml` (written with defaults on first run) and are edited in the
 window's **Settings** (`ctrl+,`) -- an OpenAI-compatible endpoint's URL, model and API
@@ -194,7 +197,8 @@ window. Reads and detection are refused until the model is ready.
 Keys: `space` capture/retake, `enter` read, `L` block mode on/off, `tab`/`shift+tab`
 next/previous block, `ctrl+enter` read all blocks, `esc` clear the region (then
 retake), `R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`),
-`ctrl+,` settings, `H` reading history, `ctrl+plus`/`ctrl+minus`/`ctrl+0` window scale.
+`shift+enter` second opinion, `ctrl+,` settings, `H` reading history,
+`ctrl+plus`/`ctrl+minus`/`ctrl+0` window scale.
 Phone zoom: the slider, the wheel over the preview, `+`/`-`, `0` to reset. The
 region: drag inside it to move it, drag a corner handle to reshape it, arrow keys to
 nudge (`shift` for one pixel), `[`/`]` or the wheel over the zoomed view to shrink/grow

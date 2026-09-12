@@ -184,37 +184,31 @@ impl Renderer {
     }
 }
 
-/// The reading as Typst markup: maths converted, the rest escaped, line breaks kept.
+/// The reading as Typst markup: maths converted (a `$$` block may span lines), the
+/// rest escaped with its line breaks kept.
 fn to_typst(text: &str) -> String {
     let mut out = String::new();
-    for (i, line) in text.lines().enumerate() {
-        if i > 0 {
-            out.push_str(if line.trim().is_empty() {
-                "\n\n"
-            } else {
-                " \\\n"
-            });
-        }
-        line_to_typst(line, &mut out);
-    }
-    out
-}
-
-fn line_to_typst(line: &str, out: &mut String) {
-    let mut rest = line;
+    let mut rest = text;
     let mut at_line_start = true;
     while !rest.is_empty() {
         let Some((start, open, close, display)) = next_math(rest) else {
-            escape(rest, at_line_start, out);
+            escape(rest, at_line_start, &mut out);
             break;
         };
-        escape(&rest[..start], at_line_start, out);
+        escape(&rest[..start], at_line_start, &mut out);
         at_line_start = false;
         let after = &rest[start + open.len()..];
         match after.find(close) {
             Some(end) => {
                 let tex = &after[..end];
-                match mitex::convert_math(tex, None).map(|m| modernise(&m)) {
+                // Newlines inside the converted maths are only layout.
+                let converted = mitex::convert_math(tex, None).map(|m| {
+                    modernise(&m)
+                        .split_whitespace()
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                });
+                match converted {
                     Ok(math) if !tex.trim().is_empty() => {
                         if display {
                             out.push_str(&format!("$ {math} $"));
@@ -225,17 +219,25 @@ fn line_to_typst(line: &str, out: &mut String) {
                     _ => escape(
                         &rest[start..start + open.len() + end + close.len()],
                         false,
-                        out,
+                        &mut out,
                     ),
                 }
                 rest = &after[end + close.len()..];
+                // A display block on its own line: the newline after it is its own.
+                if display {
+                    if let Some(r) = rest.strip_prefix('\n') {
+                        rest = r;
+                        at_line_start = true;
+                    }
+                }
             }
             None => {
-                escape(&rest[start..], false, out);
+                escape(&rest[start..], false, &mut out);
                 break;
             }
         }
     }
+    out
 }
 
 /// The next maths opener in `s`: its byte offset, the opener, its closer, and
@@ -262,15 +264,26 @@ fn next_math(s: &str) -> Option<(usize, &'static str, &'static str, bool)> {
 /// and the list/heading markers only matter at the start of a line.
 fn escape(s: &str, at_line_start: bool, out: &mut String) {
     let mut first = at_line_start;
-    for c in s.chars() {
-        let special =
-            "#$*_`<>@\\[]~".contains(c) || (first && !c.is_whitespace() && "-+/=".contains(c));
-        if special {
-            out.push('\\');
+    for (i, line) in s.split('\n').enumerate() {
+        if i > 0 {
+            // A blank line is a paragraph break, any other a line break.
+            out.push_str(if line.trim().is_empty() {
+                "\n\n"
+            } else {
+                " \\\n"
+            });
+            first = true;
         }
-        out.push(c);
-        if !c.is_whitespace() {
-            first = false;
+        for c in line.chars() {
+            let special =
+                "#$*_`<>@\\[]~".contains(c) || (first && !c.is_whitespace() && "-+/=".contains(c));
+            if special {
+                out.push('\\');
+            }
+            out.push(c);
+            if !c.is_whitespace() {
+                first = false;
+            }
         }
     }
 }
@@ -300,6 +313,14 @@ mod tests {
         assert!(t.contains("!="), "{t}");
         assert!(t.contains("\\#3"), "{t}");
         assert!(t.contains(" \\\nnext line"), "{t}");
+    }
+
+    #[test]
+    fn display_maths_spans_lines() {
+        let t = to_typst("func\n$$\n\\ln x+b 1\n$$\nnext");
+        assert!(t.contains("$ ln"), "{t}");
+        assert!(!t.contains("\\$"), "{t}");
+        assert!(t.ends_with("next"), "{t}");
     }
 
     #[test]

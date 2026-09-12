@@ -161,7 +161,7 @@ the WebGPU provider is a separate `libwebgpu_dawn.so` that lands next to the bin
 (as a symlink into `~/.cache/dfbin` -- copy the real file into a release tarball),
 found via the `$ORIGIN` rpath from `build.rs`. `--no-default-features` builds without
 any of this. The hidden `--screenshot-after SECS --screenshot-path FILE`,
-`--dev-crop X,Y,W,H`, `--dev-read`, `--dev-detect`, `--dev-read-all` and `--dev-settings` flags let you
+`--dev-crop X,Y,W,H`, `--dev-read [--dev-second]`, `--dev-detect`, `--dev-read-all` and `--dev-settings` flags let you
 drive it from a script (GNOME blocks external screenshots of the window);
 `XDG_CONFIG_HOME` points it at a scratch backend config.
 

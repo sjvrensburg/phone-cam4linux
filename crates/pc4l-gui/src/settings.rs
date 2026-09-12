@@ -60,6 +60,16 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Outcome
                             apply_scale = true;
                         }
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Reading text size");
+                        ui.add(
+                            Slider::new(&mut draft.ui.reading_size, 10.0..=40.0)
+                                .step_by(1.0)
+                                .fixed_decimals(0)
+                                .suffix(" pt"),
+                        )
+                        .on_hover_text("the transcriptions, typeset or raw; scales with the window");
+                    });
                     ui.add_space(8.0);
 
                     ui.heading("Backends");

@@ -100,6 +100,11 @@ struct Args {
     #[arg(long, hide = true)]
     dev_read: bool,
 
+    /// Development aid: with --dev-read, ask the next backend too once the first
+    /// answer is in.
+    #[arg(long, hide = true, requires = "dev_read")]
+    dev_second: bool,
+
     /// Development aid: start with the Settings window open.
     #[arg(long, hide = true)]
     dev_settings: bool,
@@ -236,6 +241,7 @@ fn main() -> Result<()> {
         })
         .transpose()?;
     let dev_read = args.dev_read;
+    let dev_second = args.dev_second;
     let dev_detect = args.dev_detect;
     let dev_settings = args.dev_settings;
     let dev_read_all = args.dev_read_all;
@@ -291,7 +297,7 @@ fn main() -> Result<()> {
             );
             app.set_rotation(rotation);
             app.set_crop(dev_crop);
-            app.set_dev_read(dev_read);
+            app.set_dev_read(dev_read, dev_second);
             app.set_dev_detect(dev_detect, dev_read_all);
             app.set_settings_open(dev_settings);
             app.set_dev_zoom(dev_zoom);

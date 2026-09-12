@@ -185,8 +185,7 @@ pub trait Typesetter: Send + Sync {
 
 /// Width the readings are typeset at, in points; shown scaled down if the panel
 /// is narrower.
-const TYPESET_WIDTH_PT: f32 = 440.0;
-const TYPESET_SIZE_PT: f32 = 15.0;
+const TYPESET_WIDTH_PT: f32 = 480.0;
 
 /// A reading typeset, or why not.
 enum Typeset {
@@ -426,6 +425,8 @@ pub struct App {
     read_all_armed: bool,
     /// Development aid: read once, as soon as a frame is available.
     dev_read: bool,
+    /// Development aid: then ask the next backend too.
+    dev_second: bool,
     /// Development aid: read every block once there are some.
     dev_read_all: bool,
     /// Development aid: a zoom to apply live, and when the first frame was seen.
@@ -490,6 +491,7 @@ impl App {
             read_queue: VecDeque::new(),
             read_all_armed: false,
             dev_read: false,
+            dev_second: false,
             dev_read_all: false,
             dev_zoom: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
@@ -533,6 +535,11 @@ impl App {
         }
         if let Some(ctx) = &self.ctx {
             ctx.set_zoom_factor(new.ui.scale);
+        }
+        if (new.ui.reading_size - self.config.ui.reading_size).abs() > 0.01 {
+            for entry in &mut self.results {
+                entry.typeset.clear();
+            }
         }
         self.config = new;
     }
@@ -665,8 +672,9 @@ impl App {
         self.dev_zoom = zoom.map(|z| (z, None));
     }
 
-    pub fn set_dev_read(&mut self, on: bool) {
+    pub fn set_dev_read(&mut self, on: bool, second: bool) {
         self.dev_read = on;
+        self.dev_second = second;
     }
 
     pub fn set_settings_open(&mut self, open: bool) {
@@ -854,8 +862,43 @@ impl App {
         }
     }
 
+    /// A second opinion: the current selection read again by the next backend in
+    /// the list, listed alongside. The selected backend does not change.
+    fn second_opinion(&mut self) {
+        if self.backends.len() < 2 {
+            self.say("a second opinion needs a second backend (Settings)");
+            return;
+        }
+        self.read_queue.clear();
+        let selection = self.selection();
+        let mode = self.read_mode();
+        let other = (self.selected_backend + 1) % self.backends.len();
+        // Keep the list: same scope as the reading it seconds.
+        let scope = match self.results_key {
+            Some((_, ResultsScope::AllBlocks)) => ResultsScope::AllBlocks,
+            _ => ResultsScope::One(selection),
+        };
+        let label = self
+            .results
+            .last()
+            .and_then(|e| e.label.clone())
+            .map(|l| format!("{l} (2nd opinion)"));
+        self.read_with(other, selection, mode, scope, label);
+    }
+
     fn read_selection(
         &mut self,
+        selection: Option<Selection>,
+        mode: Mode,
+        scope: ResultsScope,
+        label: Option<String>,
+    ) {
+        self.read_with(self.selected_backend, selection, mode, scope, label);
+    }
+
+    fn read_with(
+        &mut self,
+        backend_index: usize,
         selection: Option<Selection>,
         mode: Mode,
         scope: ResultsScope,
@@ -865,7 +908,7 @@ impl App {
             self.say("still reading the last one");
             return;
         }
-        let Some(backend) = self.backends.get(self.selected_backend).cloned() else {
+        let Some(backend) = self.backends.get(backend_index).cloned() else {
             self.say("no transcription backends configured (see ~/.config/pc4l/gui.toml)");
             return;
         };
@@ -1705,6 +1748,19 @@ impl App {
                 if !self.blocks.is_empty() && ui.button("Read all blocks  [ctrl+enter]").clicked() {
                     self.read_all();
                 }
+                if self.backends.len() > 1 {
+                    let other = (self.selected_backend + 1) % self.backends.len();
+                    if ui
+                        .button("2nd opinion  [shift+enter]")
+                        .on_hover_text(format!(
+                            "read the same thing with {} and list it alongside",
+                            self.backends[other].name()
+                        ))
+                        .clicked()
+                    {
+                        self.second_opinion();
+                    }
+                }
             });
             let current = self
                 .backends
@@ -1771,6 +1827,7 @@ impl App {
                 // One read at a time: newest on top. A "read all": in page order.
                 let in_order = matches!(self.results_key, Some((_, ResultsScope::AllBlocks)));
                 let typesetter = self.typeset_on.then(|| self.typesetter.clone()).flatten();
+                let reading_size = self.config.ui.reading_size;
                 let mut ordered: Vec<_> = self.results.iter_mut().collect();
                 if !in_order {
                     ordered.reverse();
@@ -1780,9 +1837,13 @@ impl App {
                         ui.strong(label);
                     }
                     match &entry.result {
-                        Ok(t) => {
-                            show_transcription(ui, t, typesetter.as_deref(), &mut entry.typeset)
-                        }
+                        Ok(t) => show_transcription(
+                            ui,
+                            t,
+                            typesetter.as_deref(),
+                            &mut entry.typeset,
+                            reading_size,
+                        ),
                         Err(e) => {
                             ui.colored_label(ui.visuals().error_fg_color, e);
                         }
@@ -1800,10 +1861,13 @@ impl App {
                 i.modifiers.command && i.key_pressed(Key::S),
                 !i.modifiers.shift && i.key_pressed(Key::R),
                 i.modifiers.shift && i.key_pressed(Key::R),
-                !i.modifiers.command && i.key_pressed(Key::Enter),
+                !i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::Enter),
                 i.modifiers.command && i.key_pressed(Key::Enter),
             )
         });
+        if ctx.input(|i| i.modifiers.shift && !i.modifiers.command && i.key_pressed(Key::Enter)) {
+            self.second_opinion();
+        }
         // Blocks: L detects, tab / shift+tab walk them.
         let (detect, tab) = ctx.input(|i| {
             (
@@ -2004,6 +2068,10 @@ impl eframe::App for App {
             self.dev_read = false;
             self.read();
         }
+        if self.dev_second && self.pending.is_none() && !self.results.is_empty() {
+            self.dev_second = false;
+            self.second_opinion();
+        }
         if self.dev_read_all && !self.blocks.is_empty() && self.backend_ready() {
             self.dev_read_all = false;
             self.read_all();
@@ -2031,6 +2099,7 @@ fn show_transcription(
     t: &Transcription,
     typesetter: Option<&dyn Typesetter>,
     typeset: &mut HashMap<usize, Typeset>,
+    size_pt: f32,
 ) {
     ui.horizontal(|ui| {
         ui.strong(&t.backend);
@@ -2062,7 +2131,7 @@ fn show_transcription(
             let rendered = typesetter.map(|ts| {
                 typeset
                     .entry(i)
-                    .or_insert_with(|| typeset_reading(ui, ts, &r.text))
+                    .or_insert_with(|| typeset_reading(ui, ts, &r.text, size_pt))
             });
             match rendered {
                 Some(Typeset::Image { texture, size }) => {
@@ -2073,7 +2142,9 @@ fn show_transcription(
                     );
                 }
                 _ => {
-                    ui.add(egui::Label::new(egui::RichText::new(&r.text).size(18.0)).wrap());
+                    // Points to egui's logical pixels: 1 pt = 4/3 px at 96 dpi.
+                    let px = size_pt * 4.0 / 3.0;
+                    ui.add(egui::Label::new(egui::RichText::new(&r.text).size(px)).wrap());
                 }
             }
         });
@@ -2090,13 +2161,13 @@ fn show_transcription(
 }
 
 /// Renders one reading into a texture in the window's text colour.
-fn typeset_reading(ui: &egui::Ui, ts: &dyn Typesetter, text: &str) -> Typeset {
+fn typeset_reading(ui: &egui::Ui, ts: &dyn Typesetter, text: &str, size_pt: f32) -> Typeset {
     let colour = ui.visuals().text_color();
     let scale = ui.ctx().pixels_per_point() * 1.5;
     match ts.render(
         text,
         TYPESET_WIDTH_PT,
-        TYPESET_SIZE_PT,
+        size_pt,
         scale,
         [colour.r(), colour.g(), colour.b()],
     ) {
