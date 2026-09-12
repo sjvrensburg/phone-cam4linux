@@ -13,7 +13,7 @@
 //! rectangle (a curved or tilted page) is rectified before it is shown or read. The
 //! crop's corners can be dragged, so a block is a starting point, not a verdict.
 
-use crate::layout::{self, Block, BlockDetector, Quad};
+use crate::layout::{self, Block, BlockDetector, Quad, Role};
 use crate::settings;
 use crate::stream::{Shared, Status, Worker};
 use crate::transcribe::{BackendConfig, Config, LayoutConfig, Mode, Transcriber, Transcription};
@@ -42,7 +42,18 @@ const HANDLE_PX: f32 = 10.0;
 /// Drags smaller than this are a click, which clears the crop.
 const MIN_CROP_PX: usize = 8;
 const SELECTED_COLOUR: Color32 = Color32::from_rgb(255, 196, 0);
-const BLOCK_COLOUR: Color32 = Color32::from_rgb(255, 90, 40);
+/// Block outlines by role: text orange, formulas violet, figures blue, furniture grey.
+fn role_colour(role: Role) -> Color32 {
+    match role {
+        Role::Text => Color32::from_rgb(255, 90, 40),
+        Role::Formula => Color32::from_rgb(200, 90, 255),
+        Role::Figure => Color32::from_rgb(60, 190, 255),
+        Role::Other => Color32::from_rgb(170, 170, 170),
+    }
+}
+/// Blocks with a side shorter than this fraction of the view's shorter edge are
+/// slivers the detector leaves at line edges, not blocks.
+const MIN_BLOCK_FRACTION: f32 = 0.012;
 
 /// A rectangle in pixels, in whichever space the context says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -355,6 +366,8 @@ pub struct App {
     /// The crop's quad when it came from a non-rectangular block; cleared by any
     /// hand edit of the crop.
     quad: Option<Quad>,
+    /// What the crop is, when it came from a block: picks the prompt.
+    crop_role: Option<Role>,
     drag: Option<Drag>,
     /// Scroll accumulators (egui smooths wheel input over frames).
     wheel_preview: f32,
@@ -400,9 +413,9 @@ pub struct App {
     block_mode: bool,
     pending_detect: Option<(Receiver<anyhow::Result<Vec<Block>>>, Instant)>,
     last_detect: Option<Instant>,
-    /// Blocks still to read, for "read all": label and where, taken when it began
-    /// so a live re-detection cannot reshuffle them.
-    read_queue: VecDeque<(String, Selection)>,
+    /// Blocks still to read, for "read all": label, where and how, taken when it
+    /// began so a live re-detection cannot reshuffle them.
+    read_queue: VecDeque<(String, Selection, Mode)>,
     /// A "read all" waiting for the capture's own blocks to arrive.
     read_all_armed: bool,
     /// Development aid: read once, as soon as a frame is available.
@@ -433,6 +446,7 @@ impl App {
             rotation: Rotation::None,
             crop: None,
             quad: None,
+            crop_role: None,
             drag: None,
             wheel_preview: 0.0,
             wheel_crop: 0.0,
@@ -612,7 +626,18 @@ impl App {
     fn set_rect(&mut self, crop: Option<Crop>) {
         self.crop = crop;
         self.quad = None;
+        self.crop_role = None;
         self.selected_block = None;
+    }
+
+    /// The mode a read of the current selection takes: a formula block is read as
+    /// maths, any other selection as handwriting, no selection as a page.
+    fn read_mode(&self) -> Mode {
+        match (self.crop, self.crop_role) {
+            (None, _) => Mode::Page,
+            (Some(_), Some(Role::Formula)) => Mode::Formula,
+            (Some(_), _) => Mode::Crop,
+        }
     }
 
     fn selection(&self) -> Option<Selection> {
@@ -629,6 +654,7 @@ impl App {
         };
         self.crop = Some(b.rect);
         self.quad = b.quad;
+        self.crop_role = Some(b.role());
         self.selected_block = Some(i);
     }
 
@@ -675,7 +701,8 @@ impl App {
     fn read(&mut self) {
         self.read_queue.clear();
         let selection = self.selection();
-        self.read_selection(selection, ResultsScope::One(selection), None);
+        let mode = self.read_mode();
+        self.read_selection(selection, mode, ResultsScope::One(selection), None);
     }
 
     /// Reads every detected block in reading order, one after the other. Reads are
@@ -718,12 +745,18 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, b)| {
+                let mode = if b.role() == Role::Formula {
+                    Mode::Formula
+                } else {
+                    Mode::Crop
+                };
                 (
                     format!("#{} {}", i + 1, b.label),
                     Selection {
                         rect: b.rect,
                         quad: b.quad,
                     },
+                    mode,
                 )
             })
             .collect();
@@ -737,17 +770,18 @@ impl App {
         if self.pending.is_some() {
             return;
         }
-        if let Some((label, selection)) = self.read_queue.pop_front() {
+        if let Some((label, selection, mode)) = self.read_queue.pop_front() {
             self.crop = Some(selection.rect);
             self.quad = selection.quad;
             self.selected_block = None;
-            self.read_selection(Some(selection), ResultsScope::AllBlocks, Some(label));
+            self.read_selection(Some(selection), mode, ResultsScope::AllBlocks, Some(label));
         }
     }
 
     fn read_selection(
         &mut self,
         selection: Option<Selection>,
+        mode: Mode,
         scope: ResultsScope,
         label: Option<String>,
     ) {
@@ -770,11 +804,6 @@ impl App {
         // starts a fresh list.
         self.set_results_key(scope);
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
-        let mode = if selection.is_some() {
-            Mode::Crop
-        } else {
-            Mode::Page
-        };
         let (rgba, w, h) = render_selection(&frame, self.rotation, selection, 1);
         let mut png = Vec::new();
         let encoded = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
@@ -950,10 +979,14 @@ impl App {
             .name("pc4l-detect".into())
             .spawn(move || {
                 // Back from the decimated image to view pixels.
+                let min_side = (vw.min(vh) as f32 * MIN_BLOCK_FRACTION) as usize;
                 let result = detector.detect(&img).map(|blocks| {
                     blocks
                         .into_iter()
                         .filter_map(|mut b| {
+                            if b.rect.w * step < min_side || b.rect.h * step < min_side {
+                                return None;
+                            }
                             b.rect = Crop {
                                 x: b.rect.x * step,
                                 y: b.rect.y * step,
@@ -1230,6 +1263,15 @@ impl App {
                     self.blocks.len(),
                     if self.blocks.len() == 1 { "" } else { "s" }
                 ));
+                for (role, name) in [
+                    (Role::Text, "text"),
+                    (Role::Formula, "formula"),
+                    (Role::Figure, "figure"),
+                ] {
+                    if self.blocks.iter().any(|b| b.role() == role) {
+                        ui.colored_label(role_colour(role), name);
+                    }
+                }
             } else if let Some(status) = self.detector.as_ref().and_then(|d| d.status()) {
                 ui.separator();
                 ui.weak(status);
@@ -1351,7 +1393,7 @@ impl App {
             let colour = if selected {
                 SELECTED_COLOUR
             } else {
-                BLOCK_COLOUR
+                role_colour(b.role())
             };
             let width = if selected { 2.5 } else { 2.0 };
             painter.add(Shape::closed_line(
@@ -1562,10 +1604,10 @@ impl App {
     fn read_section(&mut self, ui: &mut egui::Ui) {
         ui.add_space(4.0);
         ui.horizontal(|ui| {
-            let what = if self.crop.is_some() {
-                "Read the box  [enter]"
-            } else {
-                "Read the page  [enter]"
+            let what = match self.read_mode() {
+                Mode::Crop => "Read the box  [enter]",
+                Mode::Formula => "Read the formula  [enter]",
+                Mode::Page => "Read the page  [enter]",
             };
             ui.add_enabled_ui(self.pending.is_none() && !self.backends.is_empty(), |ui| {
                 if ui.button(what).clicked() {

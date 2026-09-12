@@ -156,6 +156,7 @@ impl Detector {
                 quad: mask_quad(&masks, i, bbox, sx, sy).unwrap_or_else(|| rect_quad(bbox)),
             });
         }
+        suppress_overlaps(&mut blocks);
         blocks.sort_by_key(|b| b.order);
         log::debug!(
             "layout: {} of {} blocks kept; run {:.0} ms, post {:.0} ms",
@@ -166,6 +167,36 @@ impl Detector {
         );
         Ok(blocks)
     }
+}
+
+/// The model reports the same region more than once at times (a title and a text
+/// block on the same lines, or a near-duplicate a class apart); PaddleX runs an NMS
+/// over the classes for this. Keeps the higher score when two boxes mostly coincide,
+/// or when one is almost entirely inside the other.
+fn suppress_overlaps(blocks: &mut Vec<Block>) {
+    blocks.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut kept: Vec<Block> = Vec::with_capacity(blocks.len());
+    for b in blocks.drain(..) {
+        let dup = kept.iter().any(|k| {
+            let (inter, a1, a2) = overlap(k.bbox, b.bbox);
+            inter / (a1 + a2 - inter) > 0.6 || inter / a1.min(a2) > 0.85
+        });
+        if !dup {
+            kept.push(b);
+        }
+    }
+    *blocks = kept;
+}
+
+/// Intersection area and the two areas.
+fn overlap(a: [f32; 4], b: [f32; 4]) -> (f32, f32, f32) {
+    let w = (a[2].min(b[2]) - a[0].max(b[0])).max(0.0);
+    let h = (a[3].min(b[3]) - a[1].max(b[1])).max(0.0);
+    (
+        w * h,
+        (a[2] - a[0]) * (a[3] - a[1]),
+        (b[2] - b[0]) * (b[3] - b[1]),
+    )
 }
 
 pub fn rect_quad(b: [f32; 4]) -> Quad {
@@ -357,6 +388,27 @@ mod tests {
         // A tilted one keeps its shape.
         let tilted = order_quad([[6.0, 0.0], [0.0, 5.0], [14.0, 20.0], [20.0, 15.0]]);
         assert_eq!(tilted, [[0.0, 5.0], [6.0, 0.0], [20.0, 15.0], [14.0, 20.0]]);
+    }
+
+    #[test]
+    fn overlapping_detections_keep_the_stronger() {
+        let mk = |score, bbox, order| Block {
+            label: "text",
+            score,
+            bbox,
+            order,
+            quad: rect_quad(bbox),
+        };
+        let mut blocks = vec![
+            mk(0.5, [0.0, 0.0, 100.0, 50.0], 0),
+            mk(0.7, [2.0, 1.0, 101.0, 52.0], 1),
+            mk(0.6, [10.0, 10.0, 30.0, 20.0], 2),
+            mk(0.9, [200.0, 0.0, 300.0, 50.0], 3),
+        ];
+        suppress_overlaps(&mut blocks);
+        let mut orders: Vec<i32> = blocks.iter().map(|b| b.order).collect();
+        orders.sort();
+        assert_eq!(orders, vec![1, 3]);
     }
 
     #[test]

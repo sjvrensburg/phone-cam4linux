@@ -20,6 +20,13 @@ pub const CROP_PROMPT: &str =
      an abbreviation, and do not explain. If part of it is struck out, show that. \
      If you cannot read it, say UNREADABLE.";
 
+/// For a block the layout model called a formula.
+pub const FORMULA_PROMPT: &str =
+    "This is a crop of a handwritten mathematical expression from a student's answer. \
+     Write it out exactly as LaTeX between $ signs, symbol for symbol. Do not simplify, \
+     correct or complete it, and do not explain. If part of it is struck out, leave it \
+     out. If you cannot read it, say UNREADABLE.";
+
 /// Verbatim from halo-workbench `app/handwriting.py`.
 pub const PAGE_PROMPT: &str =
     "Transcribe the handwritten text in the attached image of a student's answer \
@@ -32,6 +39,8 @@ const REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 pub enum Mode {
     /// One word or line the operator boxed: read it character for character.
     Crop,
+    /// A block the layout model called a formula: read it as maths.
+    Formula,
     /// A whole page.
     Page,
 }
@@ -41,13 +50,15 @@ impl Mode {
     pub fn default_prompt(self) -> &'static str {
         match self {
             Mode::Crop => CROP_PROMPT,
+            Mode::Formula => FORMULA_PROMPT,
             Mode::Page => PAGE_PROMPT,
         }
     }
 
+    /// The hint API knows crops and pages; a formula is a crop to it.
     fn api_name(self) -> &'static str {
         match self {
-            Mode::Crop => "crop",
+            Mode::Crop | Mode::Formula => "crop",
             Mode::Page => "page",
         }
     }
@@ -256,6 +267,8 @@ impl Default for LayoutConfig {
 pub struct PromptsConfig {
     /// For a boxed region (a word or a line).
     pub crop: String,
+    /// For a block the layout model called a formula.
+    pub formula: String,
     /// For a whole page.
     pub page: String,
 }
@@ -264,6 +277,7 @@ impl Default for PromptsConfig {
     fn default() -> Self {
         Self {
             crop: CROP_PROMPT.into(),
+            formula: FORMULA_PROMPT.into(),
             page: PAGE_PROMPT.into(),
         }
     }
@@ -273,6 +287,7 @@ impl PromptsConfig {
     pub fn for_mode(&self, mode: Mode) -> &str {
         match mode {
             Mode::Crop => &self.crop,
+            Mode::Formula => &self.formula,
             Mode::Page => &self.page,
         }
     }

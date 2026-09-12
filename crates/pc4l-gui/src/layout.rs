@@ -23,6 +23,31 @@ pub struct Block {
     pub quad: Option<Quad>,
 }
 
+/// What kind of thing a block is, as far as reading it is concerned: the 25
+/// detector classes fold into what gets a different prompt or colour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// Prose, titles, references, notes: read as handwriting.
+    Text,
+    /// A displayed or inline formula: read as maths.
+    Formula,
+    /// Pictures, charts, tables, seals: worth a crop, not a transcription.
+    Figure,
+    /// Page furniture (numbers, headers, footers).
+    Other,
+}
+
+impl Block {
+    pub fn role(&self) -> Role {
+        match self.label {
+            "display_formula" | "inline_formula" => Role::Formula,
+            "image" | "chart" | "table" | "seal" | "header_image" | "footer_image" => Role::Figure,
+            "number" | "formula_number" | "header" | "footer" => Role::Other,
+            _ => Role::Text,
+        }
+    }
+}
+
 /// Something that finds blocks in a page image. Implementations run on a worker
 /// thread and may block.
 pub trait BlockDetector: Send + Sync {

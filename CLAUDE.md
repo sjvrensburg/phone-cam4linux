@@ -110,7 +110,9 @@ the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 halo-workbench's `handwriting.py` and travel with each read (`Transcriber::read`
 takes the prompt; the hint API ignores it),
 readings are grouped and counted, never merged; `layout.rs`: the `BlockDetector`
-trait, `Block`/`Quad` in view space and the perspective `rectify` (imageproc) a
+trait, `Block`/`Quad` in view space, `Role` (the 25 classes folded into
+text/formula/figure/other -- colour and prompt follow it, `Mode::Formula` for a
+formula block) and the perspective `rectify` (imageproc) a
 non-rectangular block goes through before it is shown or read -- feature-independent
 so the window builds without a detector; `settings.rs`: the Settings window editing
 a draft `Config`, applied by `App::apply_config` (backends whose entry is unchanged
@@ -134,7 +136,9 @@ undocumented scalar `num_logits_to_keep` input; preprocessing and MRoPE position
 ported from oar-ocr-vl's Candle implementation), `local/layout.rs` is PP-DocLayoutV3
 (official ONNX export: 800x800 stretched input, `[N,7]` boxes with a reading-order
 column plus `[N,200,200]` instance masks; mask → largest contour → approxPolyDP →
-min-area rect gives the quad, as PaddleX does), `local/models.rs` finds or downloads
+min-area rect gives the quad, as PaddleX does; `suppress_overlaps` is the
+cross-class NMS PaddleX also runs, since the model reports the same lines twice at
+times), `local/models.rs` finds or downloads
 each model's files (pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR/<name>/`,
 exe-adjacent `models/<name>/`, then `~/.cache/pc4l/models/<name>/`), and
 `local/mod.rs` holds the one process-wide `ort` environment (`ort` refuses a second)

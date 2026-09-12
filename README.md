@@ -166,9 +166,12 @@ is remembered):
 [PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3), running over
 the page as you aim (a few times a second live, once on a capture): every text block,
 formula, figure and so on, numbered in the reading order the model predicts, drawn on
-the preview. Click a block or `tab`/`shift+tab` through them to make it the region
-(it follows the block as you aim until you adjust it), then drag its corners if the
-model's box is not quite what you want; **Read all
+the preview, coloured by kind: orange for text, violet for a formula, blue for a
+figure or table, grey for page furniture. Click a block or `tab`/`shift+tab` through
+them to make it the region (it follows the block as you aim until you adjust it), then
+drag its corners if the model's box is not quite what you want. A formula block is read
+with its own prompt (asking for LaTeX; new, and not part of the model comparison the
+other two prompts come from -- adjust it in Settings). **Read all
 blocks** (`ctrl+enter`) reads them one after the other and lists the readings in page
 order. The model predicts multi-point boxes, so on a curved or tilted page a block is a
 quadrilateral, not a rectangle; such a block is perspective-rectified before it is

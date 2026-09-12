@@ -136,6 +136,12 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Outcome
                          every model comparison was made with.",
                     );
                     prompt_row(ui, "For a boxed region", &mut draft.prompts.crop, Mode::Crop);
+                    prompt_row(
+                        ui,
+                        "For a detected formula block",
+                        &mut draft.prompts.formula,
+                        Mode::Formula,
+                    );
                     prompt_row(ui, "For a whole page", &mut draft.prompts.page, Mode::Page);
                     ui.add_space(8.0);
 
