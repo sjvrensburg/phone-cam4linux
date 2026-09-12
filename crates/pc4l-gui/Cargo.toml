@@ -20,13 +20,16 @@ env_logger.workspace = true
 eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
 egui = "0.36"
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Perspective warp for rectifying a detected block; contours/min-area-rect for the
+# detector (no default features: they pull every image format and a text renderer).
+imageproc = { version = "0.27", default-features = false, features = ["rayon"] }
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 ureq = { version = "3", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 base64 = "0.22"
-# local-model: bundled GLM-OCR on ONNX Runtime (WebGPU/Vulkan or CPU).
+# local-model: bundled GLM-OCR and PP-DocLayoutV3 on ONNX Runtime (WebGPU/Vulkan or CPU).
 # HEAD of pykeio/ort as read on 2026-09-12; its API differs from the published rc.13.
 ort = { git = "https://github.com/pykeio/ort", rev = "bc79f5947d9193244bacfc357556de0b69bb99ea", features = ["half", "webgpu"], optional = true }
 half = { version = "2", optional = true }
@@ -37,7 +40,8 @@ sha2 = { version = "0.10", optional = true }
 [features]
 default = ["local-model"]
 ffmpeg = ["phone-cam4linux/ffmpeg"]
-# The out-of-the-box transcription model: GLM-OCR (onnx-community q4f16 export) run
-# through ONNX Runtime, WebGPU (Vulkan on Linux) with CPU fallback. Downloads
-# pyke's prebuilt ONNX Runtime at build time and the ~650 MB model on first use.
+# The out-of-the-box models: GLM-OCR (onnx-community q4f16 export) for reading and
+# PP-DocLayoutV3 for block detection, run through ONNX Runtime, WebGPU (Vulkan on
+# Linux) with CPU fallback. Downloads pyke's prebuilt ONNX Runtime at build time and
+# the models (~650 MB + ~130 MB) on first use.
 local-model = ["dep:ort", "dep:half", "dep:ndarray", "dep:tokenizers", "dep:sha2"]

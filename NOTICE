@@ -43,8 +43,16 @@ GLM-OCR (https://huggingface.co/zai-org/GLM-OCR)
   Copyright Zhipu AI (Z.ai). MIT License.
   ONNX export: https://huggingface.co/onnx-community/GLM-OCR-ONNX (MIT License).
   Not included in the binaries: downloaded on first use into the user's cache
-  (SHA-256 verified against the manifest in crates/pc4l-gui/src/local/mod.rs) or
+  (SHA-256 verified against the manifest in crates/pc4l-gui/src/local/models.rs) or
   shipped as a separate release archive.
+
+PP-DocLayoutV3 (https://huggingface.co/PaddlePaddle/PP-DocLayoutV3)
+  Copyright PaddlePaddle Authors. Apache License 2.0.
+  ONNX export: https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx (Apache-2.0).
+  The block detector; fetched and shipped the same way as GLM-OCR. Its
+  post-processing in crates/pc4l-gui/src/local/layout.rs (instance mask -> polygon ->
+  minimum-area quadrilateral) follows PaddleX's layout_analysis processors
+  (https://github.com/PaddlePaddle/PaddleX, Apache-2.0).
 
 oar-ocr (https://github.com/GreatV/oar-ocr)
   Copyright Wang Xin and contributors. Apache License 2.0.

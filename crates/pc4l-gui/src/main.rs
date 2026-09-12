@@ -3,6 +3,7 @@
 //! the `phone-cam4linux` library; this crate is the window and the reconnect policy.
 
 mod app;
+mod layout;
 #[cfg(feature = "local-model")]
 mod local;
 mod stream;
@@ -70,10 +71,10 @@ struct Args {
     #[arg(long, hide = true, value_name = "X,Y,W,H")]
     dev_crop: Option<String>,
 
-    /// Download the built-in transcription model into DIR/<model name>/ (verified
-    /// against the checksums compiled into this binary) and exit. For packaging, or
-    /// for a machine that is offline later: a `models/` directory next to the
-    /// executable is used without any download.
+    /// Download the built-in models (transcription and block detection) into
+    /// DIR/<model name>/ (verified against the checksums compiled into this binary)
+    /// and exit. For packaging, or for a machine that is offline later: a `models/`
+    /// directory next to the executable is used without any download.
     #[cfg(feature = "local-model")]
     #[arg(long, value_name = "DIR")]
     fetch_model: Option<PathBuf>,
@@ -94,6 +95,15 @@ struct Args {
     /// frame arrives.
     #[arg(long, hide = true)]
     dev_read: bool,
+
+    /// Development aid: detect blocks as soon as the detector and a frame are ready.
+    #[arg(long, hide = true)]
+    dev_detect: bool,
+
+    /// Development aid: with --dev-detect, read every block with the first backend
+    /// once they are found.
+    #[arg(long, hide = true, requires = "dev_detect")]
+    dev_read_all: bool,
 
     /// Development aid: 3 s after the first frame, set this zoom over the control
     /// channel (the live path, as the slider does).
@@ -140,9 +150,11 @@ fn main() -> Result<()> {
 
     #[cfg(feature = "local-model")]
     if let Some(dir) = &args.fetch_model {
-        let target = dir.join(local::model_dir_name());
-        local::download_into(&target, &|s| eprintln!("{s}"))?;
-        println!("{}", target.display());
+        for spec in local::models::ALL {
+            let target = dir.join(spec.name);
+            spec.download_into(&target, &|s| eprintln!("{s}"))?;
+            println!("{}", target.display());
+        }
         return Ok(());
     }
 
@@ -215,24 +227,36 @@ fn main() -> Result<()> {
         })
         .transpose()?;
     let dev_read = args.dev_read;
+    let dev_detect = args.dev_detect;
+    let dev_read_all = args.dev_read_all;
     let dev_zoom = args.dev_zoom;
     let screenshot = args
         .screenshot_after
         .zip(args.screenshot_path)
         .map(|(secs, path)| (std::time::Duration::from_secs_f32(secs), path));
 
-    let backends: Vec<std::sync::Arc<dyn transcribe::Transcriber>> =
-        match transcribe::Config::load_or_create() {
-            Ok(config) => config
-                .backends
-                .iter()
-                .filter_map(|b| b.build().map(Into::into))
-                .collect(),
-            Err(e) => {
-                log::error!("{e:#}; no transcription backends available");
-                Vec::new()
-            }
-        };
+    let backend_config = transcribe::Config::load_or_create().unwrap_or_else(|e| {
+        log::error!("{e:#}; no transcription backends available");
+        transcribe::Config {
+            backends: Vec::new(),
+            ..Default::default()
+        }
+    });
+    let backends: Vec<std::sync::Arc<dyn transcribe::Transcriber>> = backend_config
+        .backends
+        .iter()
+        .filter_map(|b| b.build().map(Into::into))
+        .collect();
+    #[cfg(feature = "local-model")]
+    let detector: Option<std::sync::Arc<dyn layout::BlockDetector>> =
+        backend_config.layout.enabled.then(|| {
+            std::sync::Arc::new(local::layout::LayoutService::new(
+                backend_config.layout.device,
+                backend_config.layout.threshold,
+            )) as _
+        });
+    #[cfg(not(feature = "local-model"))]
+    let detector: Option<std::sync::Arc<dyn layout::BlockDetector>> = None;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -246,10 +270,11 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             let worker = Worker::start(config, move || ctx.request_repaint());
-            let mut app = app::App::new(worker, save_dir, backends, screenshot);
+            let mut app = app::App::new(worker, save_dir, backends, detector, screenshot);
             app.set_rotation(rotation);
             app.set_crop(dev_crop);
             app.set_dev_read(dev_read);
+            app.set_dev_detect(dev_detect, dev_read_all);
             app.set_dev_zoom(dev_zoom);
             Ok(Box::new(app))
         }),

@@ -218,10 +218,34 @@ impl BackendConfig {
     }
 }
 
+/// The built-in block detector (PP-DocLayoutV3; needs the `local-model` build
+/// feature).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LayoutConfig {
+    pub enabled: bool,
+    pub device: LocalDevice,
+    /// Minimum detection score. Handwriting scores lower than the printed pages the
+    /// model was trained on.
+    pub threshold: f32,
+}
+
+impl Default for LayoutConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            device: LocalDevice::default(),
+            threshold: 0.4,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub backends: Vec<BackendConfig>,
+    #[serde(default)]
+    pub layout: LayoutConfig,
 }
 
 impl Config {
@@ -258,7 +282,7 @@ impl Config {
     fn default_text() -> String {
         format!(
             "# pc4l-gui transcription backends. Each [[backends]] entry is one choice in the\n\
-             # window; the first is selected at startup.\n\n{}",
+             # window; the first is selected at startup. [layout] is the block detector.\n\n{}",
             toml::to_string_pretty(&Self::default()).expect("default config serialises")
         )
     }
@@ -290,6 +314,7 @@ impl Default for Config {
                     max_tokens: 1024,
                 },
             ],
+            layout: LayoutConfig::default(),
         }
     }
 }

@@ -15,15 +15,16 @@ conversion, V4L2 sink) is implemented here.
 ```
 cargo build --release                 # fetches scrcpy-server.jar on first build (needs network)
 cargo build --release --features ffmpeg   # + system libavcodec decoder (needs full FFmpeg headers)
-cargo build --release -p pc4l-gui --no-default-features   # GUI without the built-in ONNX model (no ort download)
-cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion, GUI crop geometry)
+cargo build --release -p pc4l-gui --no-default-features   # GUI without the built-in ONNX models (no ort download)
+cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion, GUI crop geometry, quad rectification)
 cargo test -p phone-cam4linux protocol::tests::parses_codec_meta   # single test
 cargo clippy --workspace --all-targets [--features ffmpeg]
 cargo fmt --all -- --check             # CI enforces this and clippy -D warnings, both feature sets
 ```
 
 `pc4l-gui --rotate 270 --screenshot-after 8 --screenshot-path /tmp/gui.png` renders the
-window against the phone and writes a PNG of it.
+window against the phone and writes a PNG of it; add `--dev-detect [--dev-read-all]`
+to exercise block detection (and reading every block) unattended.
 
 Run against a phone (USB debugging authorized, Android 12+):
 ```
@@ -45,9 +46,10 @@ Exercise the whole V4L2 sink path with **no phone attached**:
 ## Releases
 
 `.github/workflows/release.yml` runs on a `v*` tag: builds both binaries on
-ubuntu-22.04, packages them with the dereferenced `libwebgpu_dawn.so`, docs and
-`contrib/`, builds the model archive with `pc4l-gui --fetch-model` (so it carries the
-in-binary checksums), and publishes a GitHub release with `SHA256SUMS.txt`. Cut one with
+ubuntu-24.04 (the prebuilt ONNX Runtime needs glibc 2.38), packages them with the
+dereferenced `libwebgpu_dawn.so`, docs and `contrib/`, builds the models archive with
+`pc4l-gui --fetch-model` (so it carries the in-binary checksums), and publishes a
+GitHub release with `SHA256SUMS.txt`. Cut one with
 `git tag vX.Y.Z && git push --tags` after bumping `[workspace.package].version`.
 `LICENSE` is Apache-2.0 and `NOTICE` lists third-party terms -- keep it current when a
 component is added (a model, a runtime, ported code).
@@ -103,24 +105,34 @@ systemd user unit.
 the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 *view* (rotated) coordinates mapped back to the source frame, capture, save;
 `transcribe.rs`: the `Transcriber` trait, the OpenAI-compatible and halo-workbench
-`/hint/read` backends, and the `~/.config/pc4l/gui.toml` backend list -- prompts are
-verbatim from halo-workbench's `handwriting.py`, readings are grouped and counted,
-never merged; `local/`: the built-in GLM-OCR -- `local/glmocr.rs` drives the
-onnx-community three-graph ONNX export through `ort` (vision encoder, embeddings,
-merged decoder with an explicit KV cache and the undocumented scalar
-`num_logits_to_keep` input; preprocessing and MRoPE position ids ported from
-oar-ocr-vl's Candle implementation), `local/mod.rs` finds or downloads the model files
-(pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR`, exe-adjacent `models/`,
-then `~/.cache/pc4l/models/`) and wraps it as a `Transcriber` that prepares on a
-thread). `ort` is pinned to a git commit because the published rc.13 has a different
+`/hint/read` backends, and the `~/.config/pc4l/gui.toml` backend list (plus the
+`[layout]` section) -- prompts are verbatim from halo-workbench's `handwriting.py`,
+readings are grouped and counted, never merged; `layout.rs`: the `BlockDetector`
+trait, `Block`/`Quad` in view space and the perspective `rectify` (imageproc) a
+non-rectangular block goes through before it is shown or read -- feature-independent
+so the window builds without a detector; `local/`: the built-in models --
+`local/glmocr.rs` drives the onnx-community three-graph GLM-OCR export through `ort`
+(vision encoder, embeddings, merged decoder with an explicit KV cache and the
+undocumented scalar `num_logits_to_keep` input; preprocessing and MRoPE position ids
+ported from oar-ocr-vl's Candle implementation), `local/layout.rs` is PP-DocLayoutV3
+(official ONNX export: 800x800 stretched input, `[N,7]` boxes with a reading-order
+column plus `[N,200,200]` instance masks; mask → largest contour → approxPolyDP →
+min-area rect gives the quad, as PaddleX does), `local/models.rs` finds or downloads
+each model's files (pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR/<name>/`,
+exe-adjacent `models/<name>/`, then `~/.cache/pc4l/models/<name>/`), and
+`local/mod.rs` holds the one process-wide `ort` environment (`ort` refuses a second)
+and wraps GLM-OCR as a `Transcriber` that prepares on a thread. In `app.rs` the crop
+is a rectangle plus an optional quad (`Selection`); any hand edit of the crop drops
+the quad (`set_rect`), blocks are keyed to the captured frame + rotation, and "read
+all" is a queue drained one read at a time. `ort` is pinned to a git commit because the published rc.13 has a different
 API; its `download-binaries` fetches pyke's prebuilt ONNX Runtime at build time, and
 the WebGPU provider is a separate `libwebgpu_dawn.so` that lands next to the binary
 (as a symlink into `~/.cache/dfbin` -- copy the real file into a release tarball),
 found via the `$ORIGIN` rpath from `build.rs`. `--no-default-features` builds without
 any of this. The hidden `--screenshot-after SECS --screenshot-path FILE`,
-`--dev-crop X,Y,W,H` and `--dev-read` flags let you drive it from a script (GNOME
-blocks external screenshots of the window); `XDG_CONFIG_HOME` points it at a scratch
-backend config.
+`--dev-crop X,Y,W,H`, `--dev-read`, `--dev-detect` and `--dev-read-all` flags let you
+drive it from a script (GNOME blocks external screenshots of the window);
+`XDG_CONFIG_HOME` points it at a scratch backend config.
 
 ### Non-obvious protocol details (hard-won, don't regress)
 

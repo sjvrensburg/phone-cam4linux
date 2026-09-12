@@ -6,16 +6,22 @@
 //! Everything the user sees is in *view* space: the frame turned by the chosen
 //! [`Rotation`]. The crop is kept in view coordinates and mapped back to the source
 //! frame only to fetch pixels ([`Crop::to_source`]).
+//!
+//! A block detector, when there is one, turns a captured page into a list of blocks
+//! in reading order; picking one makes it the crop, and a block that is not a
+//! rectangle (a curved or tilted page) is rectified before it is shown or read.
 
+use crate::layout::{self, Block, BlockDetector, Quad};
 use crate::stream::{Shared, Status, Worker};
 use crate::transcribe::{Mode, Transcriber, Transcription};
 use egui::{
-    Color32, ColorImage, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions,
-    Vec2,
+    Color32, ColorImage, FontId, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextureHandle,
+    TextureOptions, Vec2,
 };
 use phone_cam4linux::convert::{i420_region_to_rgba, region_size, rotate_rgba, Rotation};
 use phone_cam4linux::decode::YuvFrame;
 use phone_cam4linux::Facing;
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -24,6 +30,8 @@ use std::time::{Duration, Instant};
 /// Longest preview edge we bother converting: the preview is for aiming, the crop
 /// view and the capture are the real pixels.
 const PREVIEW_MAX_EDGE: usize = 1920;
+/// Longest edge handed to the block detector (its own input is 800 px square).
+const DETECT_MAX_EDGE: usize = 1600;
 /// Drags smaller than this are a click, which clears the crop.
 const MIN_CROP_PX: usize = 8;
 
@@ -53,7 +61,7 @@ impl Crop {
     }
 
     /// Clamps to a `width`x`height` space; `None` if nothing usable is left.
-    fn clamped(self, width: usize, height: usize) -> Option<Self> {
+    pub fn clamped(self, width: usize, height: usize) -> Option<Self> {
         let x = self.x.min(width);
         let y = self.y.min(height);
         let w = self.w.min(width - x);
@@ -84,6 +92,10 @@ impl Crop {
 
     fn contains(self, x: usize, y: usize) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
+    fn area(self) -> usize {
+        self.w * self.h
     }
 
     /// Maps a rectangle in view space (the source frame turned by `rotation`, so
@@ -123,6 +135,15 @@ fn wheel_notches(accum: &mut f32, delta: f32) -> i32 {
     notches as i32
 }
 
+/// What a results list belongs to.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ResultsScope {
+    /// One read of this selection (`None`: the whole page).
+    One(Option<Selection>),
+    /// Every block, in order.
+    AllBlocks,
+}
+
 /// A drag in progress on the preview.
 #[derive(Debug, Clone, Copy)]
 enum Drag {
@@ -153,6 +174,51 @@ fn render_region(
     (rotate_rgba(&buf, sw, sh, rotation), ow, oh)
 }
 
+/// What is selected on the view: a rectangle, and -- when it came from a detected
+/// block that is not rectangular -- the quad inside it that is the actual block.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Selection {
+    pub rect: Crop,
+    pub quad: Option<Quad>,
+}
+
+/// The pixels of a selection (or the whole view when there is none) at every
+/// `step`-th pixel, rotated as shown and, for a quad, rectified. Returns the pixels
+/// and their size.
+fn render_selection(
+    frame: &YuvFrame,
+    rotation: Rotation,
+    selection: Option<Selection>,
+    step: usize,
+) -> (Vec<u8>, usize, usize) {
+    let (vw, vh) = rotation.rotated_size(frame.width, frame.height);
+    let Some(sel) = selection else {
+        return render_region(frame, rotation, Crop::whole(vw, vh), step);
+    };
+    let (rgba, w, h) = render_region(frame, rotation, sel.rect, step);
+    let Some(quad) = sel.quad else {
+        return (rgba, w, h);
+    };
+    // The quad in the rendered region's own pixels.
+    let local: Quad = quad.map(|[x, y]| {
+        [
+            (x - sel.rect.x as f32) / step as f32,
+            (y - sel.rect.y as f32) / step as f32,
+        ]
+    });
+    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba).expect("buffer matches size");
+    match layout::rectify(&img, &local) {
+        Some(out) => {
+            let (ow, oh) = (out.width() as usize, out.height() as usize);
+            (out.into_raw(), ow, oh)
+        }
+        None => {
+            let (w, h) = (img.width() as usize, img.height() as usize);
+            (img.into_raw(), w, h)
+        }
+    }
+}
+
 /// A texture cached against the frame, region, step and rotation it was made from, so
 /// a repaint with nothing new (a hover) costs no conversion or upload. Holds the
 /// frame: comparing a bare pointer would misfire when the allocator hands a new
@@ -160,8 +226,26 @@ fn render_region(
 struct View {
     texture: Option<TextureHandle>,
     name: &'static str,
-    key: Option<(Arc<YuvFrame>, Crop, usize, Rotation)>,
+    /// ... and the size of the texture it produced.
+    key: Option<ViewKey>,
 }
+
+type ViewKey = (
+    Arc<YuvFrame>,
+    Option<Selection>,
+    usize,
+    Rotation,
+    (usize, usize),
+);
+
+/// A read in flight: its result channel, when it started, which backend, and the
+/// block label if it is one of a "read all".
+type PendingRead = (
+    Receiver<anyhow::Result<Transcription>>,
+    Instant,
+    String,
+    Option<String>,
+);
 
 impl View {
     fn new(name: &'static str) -> Self {
@@ -172,26 +256,28 @@ impl View {
         }
     }
 
+    /// `selection` is `None` for the whole view.
     fn update(
         &mut self,
         ctx: &egui::Context,
         frame: &Arc<YuvFrame>,
-        region: Crop,
+        selection: Option<Selection>,
         step: usize,
         rotation: Rotation,
-    ) {
-        if self.key.as_ref().is_some_and(|(f, r, s, rot)| {
-            Arc::ptr_eq(f, frame) && *r == region && *s == step && *rot == rotation
-        }) {
-            return;
+    ) -> (usize, usize) {
+        if let Some((f, r, s, rot, size)) = &self.key {
+            if Arc::ptr_eq(f, frame) && *r == selection && *s == step && *rot == rotation {
+                return *size;
+            }
         }
-        let (rgba, w, h) = render_region(frame, rotation, region, step);
+        let (rgba, w, h) = render_selection(frame, rotation, selection, step);
         let image = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
         match &mut self.texture {
             Some(t) => t.set(image, TextureOptions::LINEAR),
             None => self.texture = Some(ctx.load_texture(self.name, image, TextureOptions::LINEAR)),
         }
-        self.key = Some((Arc::clone(frame), region, step, rotation));
+        self.key = Some((Arc::clone(frame), selection, step, rotation, (w, h)));
+        (w, h)
     }
 }
 
@@ -204,6 +290,9 @@ pub struct App {
     rotation: Rotation,
     /// In view space.
     crop: Option<Crop>,
+    /// The crop's quad when it came from a non-rectangular block; cleared by any
+    /// hand edit of the crop.
+    quad: Option<Quad>,
     drag: Option<Drag>,
     /// Scroll accumulators (egui smooths wheel input over frames).
     wheel_preview: f32,
@@ -218,14 +307,27 @@ pub struct App {
     selected_backend: usize,
     /// For waking the UI from the read thread; set on the first frame.
     ctx: Option<egui::Context>,
-    /// A read in flight: its result channel, when it started, and which backend.
-    pending: Option<(Receiver<anyhow::Result<Transcription>>, Instant, String)>,
-    /// Readings for the current capture + crop, oldest first.
-    results: Vec<Result<Transcription, String>>,
-    /// What `results` were read from; they are dropped when it changes.
-    results_key: Option<(Arc<YuvFrame>, Option<Crop>)>,
+    pending: Option<PendingRead>,
+    /// Readings for the current capture, oldest first, each with its block label.
+    results: Vec<(Option<String>, Result<Transcription, String>)>,
+    /// What `results` were read from; they are dropped when a read of something
+    /// else starts or the capture goes.
+    results_key: Option<(Arc<YuvFrame>, ResultsScope)>,
+    detector: Option<Arc<dyn BlockDetector>>,
+    /// Detected blocks of the captured frame, in reading order, in view space.
+    blocks: Vec<Block>,
+    /// The frame and rotation `blocks` were found on; they go when it changes.
+    blocks_key: Option<(Arc<YuvFrame>, Rotation)>,
+    /// Which block the crop is, for tab to move on from.
+    selected_block: Option<usize>,
+    pending_detect: Option<(Receiver<anyhow::Result<Vec<Block>>>, Instant)>,
+    /// Blocks still to read, for "read all".
+    read_queue: VecDeque<usize>,
     /// Development aid: read once, as soon as a frame is available.
     dev_read: bool,
+    /// Development aid: detect blocks once, as soon as the detector is ready, and
+    /// then (second flag) read them all.
+    dev_detect: (bool, bool),
     /// Development aid: a zoom to apply live, and when the first frame was seen.
     dev_zoom: Option<(f32, Option<Instant>)>,
     /// Development aid: write a screenshot of the window to this path after the
@@ -238,6 +340,7 @@ impl App {
         worker: Worker,
         save_dir: PathBuf,
         backends: Vec<Arc<dyn Transcriber>>,
+        detector: Option<Arc<dyn BlockDetector>>,
         screenshot: Option<(Duration, PathBuf)>,
     ) -> Self {
         Self {
@@ -247,6 +350,7 @@ impl App {
             captured: None,
             rotation: Rotation::None,
             crop: None,
+            quad: None,
             drag: None,
             wheel_preview: 0.0,
             wheel_crop: 0.0,
@@ -260,7 +364,14 @@ impl App {
             pending: None,
             results: Vec::new(),
             results_key: None,
+            detector,
+            blocks: Vec::new(),
+            blocks_key: None,
+            selected_block: None,
+            pending_detect: None,
+            read_queue: VecDeque::new(),
             dev_read: false,
+            dev_detect: (false, false),
             dev_zoom: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
         }
@@ -274,13 +385,56 @@ impl App {
         self.dev_read = on;
     }
 
+    pub fn set_dev_detect(&mut self, detect: bool, read_all: bool) {
+        self.dev_detect = (detect, read_all);
+    }
+
     pub fn set_rotation(&mut self, rotation: Rotation) {
         self.rotate(rotation);
     }
 
     /// Sets the crop in view space; it is clamped to the frame when first drawn.
     pub fn set_crop(&mut self, crop: Option<Crop>) {
+        self.set_rect(crop);
+    }
+
+    /// A hand edit of the crop: any quad it carried no longer applies.
+    fn set_rect(&mut self, crop: Option<Crop>) {
         self.crop = crop;
+        self.quad = None;
+        self.selected_block = None;
+    }
+
+    fn selection(&self) -> Option<Selection> {
+        self.crop.map(|rect| Selection {
+            rect,
+            quad: self.quad,
+        })
+    }
+
+    /// Makes block `i` the crop.
+    fn select_block(&mut self, i: usize) {
+        let Some(b) = self.blocks.get(i) else {
+            return;
+        };
+        self.crop = Some(b.rect);
+        self.quad = b.quad;
+        self.selected_block = Some(i);
+    }
+
+    /// Tab: the next (or previous) block in reading order.
+    fn step_block(&mut self, delta: i32) {
+        if self.blocks.is_empty() {
+            self.say("no blocks: detect them first [L]");
+            return;
+        }
+        let n = self.blocks.len() as i32;
+        let next = match self.selected_block {
+            Some(i) => (i as i32 + delta).rem_euclid(n),
+            None if delta < 0 => n - 1,
+            None => 0,
+        };
+        self.select_block(next as usize);
     }
 
     fn shared(&self) -> &Arc<Shared> {
@@ -309,6 +463,49 @@ impl App {
     /// Sends the crop (or the whole view) to the selected backend on a thread.
     /// Reading a live frame freezes it first, so the answer stays next to its ink.
     fn read(&mut self) {
+        self.read_queue.clear();
+        let selection = self.selection();
+        self.read_selection(selection, ResultsScope::One(selection), None);
+    }
+
+    /// Reads every detected block in reading order, one after the other.
+    fn read_all(&mut self) {
+        if self.blocks.is_empty() {
+            self.say("no blocks: detect them first [L]");
+            return;
+        }
+        self.read_queue = (0..self.blocks.len()).collect();
+        self.set_results_key(ResultsScope::AllBlocks);
+        self.results.clear();
+        self.next_queued_read();
+    }
+
+    /// Starts the next block of a "read all" once the previous one has landed.
+    fn next_queued_read(&mut self) {
+        if self.pending.is_some() {
+            return;
+        }
+        while let Some(i) = self.read_queue.pop_front() {
+            let Some(b) = self.blocks.get(i) else {
+                continue;
+            };
+            let selection = Some(Selection {
+                rect: b.rect,
+                quad: b.quad,
+            });
+            let label = format!("#{} {}", i + 1, b.label);
+            self.select_block(i);
+            self.read_selection(selection, ResultsScope::AllBlocks, Some(label));
+            return;
+        }
+    }
+
+    fn read_selection(
+        &mut self,
+        selection: Option<Selection>,
+        scope: ResultsScope,
+        label: Option<String>,
+    ) {
         if self.pending.is_some() {
             self.say("still reading the last one");
             return;
@@ -324,15 +521,16 @@ impl App {
             self.say("nothing to read yet");
             return;
         };
-        // Results belong to this frame and box; a read of something else starts
-        // a fresh list.
-        self.sync_results_key();
+        // Results belong to this frame and selection; a read of something else
+        // starts a fresh list.
+        self.set_results_key(scope);
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
-        let (region, mode) = match self.crop {
-            Some(c) => (c, Mode::Crop),
-            None => (Crop::whole(vw, vh), Mode::Page),
+        let mode = if selection.is_some() {
+            Mode::Crop
+        } else {
+            Mode::Page
         };
-        let (rgba, w, h) = render_region(&frame, self.rotation, region, 1);
+        let (rgba, w, h) = render_selection(&frame, self.rotation, selection, 1);
         let mut png = Vec::new();
         let encoded = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
             .expect("buffer matches size")
@@ -354,14 +552,15 @@ impl App {
                 }
             })
             .expect("spawning read thread");
-        self.pending = Some((rx, Instant::now(), name));
+        self.pending = Some((rx, Instant::now(), name, label));
     }
 
-    /// Drops readings that no longer belong to what is on screen.
-    fn sync_results_key(&mut self) {
-        let key = self.captured.clone().map(|f| (f, self.crop));
+    /// Readings are kept while they are of the captured frame and `scope`; anything
+    /// else starts a fresh list.
+    fn set_results_key(&mut self, scope: ResultsScope) {
+        let key = self.captured.clone().map(|f| (f, scope));
         let same = match (&self.results_key, &key) {
-            (Some((a, ca)), Some((b, cb))) => Arc::ptr_eq(a, b) && ca == cb,
+            (Some((a, sa)), Some((b, sb))) => Arc::ptr_eq(a, b) && sa == sb,
             (None, None) => true,
             _ => false,
         };
@@ -371,21 +570,141 @@ impl App {
         }
     }
 
-    /// Collects a finished read.
+    /// Readings go with the capture they were made from.
+    fn drop_stale_results(&mut self) {
+        let stale = match (&self.results_key, &self.captured) {
+            (Some((a, _)), Some(b)) => !Arc::ptr_eq(a, b),
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if stale {
+            self.results.clear();
+            self.results_key = None;
+            self.read_queue.clear();
+        }
+    }
+
+    /// Collects a finished read, and a finished detection.
     fn poll_read(&mut self) {
-        self.sync_results_key();
-        if let Some((rx, _, _)) = &self.pending {
-            match rx.try_recv() {
-                Ok(result) => {
-                    self.results.push(result.map_err(|e| format!("{e:#}")));
-                    self.pending = None;
-                }
-                Err(mpsc::TryRecvError::Empty) => {}
+        self.drop_stale_results();
+        if let Some((rx, _, _, label)) = &self.pending {
+            let done = match rx.try_recv() {
+                Ok(result) => Some(result.map_err(|e| format!("{e:#}"))),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(mpsc::TryRecvError::Disconnected) => Some(Err("the read thread died".into())),
+            };
+            if let Some(result) = done {
+                let label = label.clone();
+                self.results.push((label, result));
+                self.pending = None;
+                self.next_queued_read();
+            }
+        }
+        if let Some((rx, started)) = &self.pending_detect {
+            let done = match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Empty) => None,
                 Err(mpsc::TryRecvError::Disconnected) => {
-                    self.results.push(Err("the read thread died".into()));
-                    self.pending = None;
+                    Some(Err(anyhow::anyhow!("the detection thread died")))
+                }
+            };
+            if let Some(result) = done {
+                let elapsed = started.elapsed();
+                self.pending_detect = None;
+                match result {
+                    Ok(blocks) => {
+                        self.say(format!(
+                            "{} block{} in {:.2}s",
+                            blocks.len(),
+                            if blocks.len() == 1 { "" } else { "s" },
+                            elapsed.as_secs_f32()
+                        ));
+                        self.blocks = blocks;
+                        self.selected_block = None;
+                    }
+                    Err(e) => self.say(format!("block detection failed: {e:#}")),
                 }
             }
+        }
+    }
+
+    /// Runs the block detector over the captured frame (capturing first if live),
+    /// on a thread. The result lands in `blocks` in view space.
+    fn detect(&mut self) {
+        let Some(detector) = self.detector.clone() else {
+            self.say("no block detector in this build");
+            return;
+        };
+        if self.pending_detect.is_some() {
+            self.say("still detecting");
+            return;
+        }
+        if !detector.ready() {
+            self.say(
+                detector
+                    .status()
+                    .unwrap_or_else(|| "block detector not ready".into()),
+            );
+            return;
+        }
+        if self.captured.is_none() {
+            self.capture();
+        }
+        let Some(frame) = self.captured.clone() else {
+            self.say("nothing to detect on yet");
+            return;
+        };
+        let rotation = self.rotation;
+        let (vw, vh) = rotation.rotated_size(frame.width, frame.height);
+        let step = vw.max(vh).div_ceil(DETECT_MAX_EDGE).max(1);
+        let (rgba, w, h) = render_region(&frame, rotation, Crop::whole(vw, vh), step);
+        let img = layout::rgba_to_rgb(&rgba, w, h);
+        self.blocks_key = Some((Arc::clone(&frame), rotation));
+        let (tx, rx) = mpsc::sync_channel(1);
+        let ctx = self.ctx.clone();
+        std::thread::Builder::new()
+            .name("pc4l-detect".into())
+            .spawn(move || {
+                // Back from the decimated image to view pixels.
+                let result = detector.detect(&img).map(|blocks| {
+                    blocks
+                        .into_iter()
+                        .filter_map(|mut b| {
+                            b.rect = Crop {
+                                x: b.rect.x * step,
+                                y: b.rect.y * step,
+                                w: b.rect.w * step,
+                                h: b.rect.h * step,
+                            }
+                            .clamped(vw, vh)?;
+                            b.quad = b
+                                .quad
+                                .map(|q| q.map(|[x, y]| [x * step as f32, y * step as f32]));
+                            Some(b)
+                        })
+                        .collect()
+                });
+                let _ = tx.send(result);
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawning detection thread");
+        self.pending_detect = Some((rx, Instant::now()));
+    }
+
+    /// Blocks belong to the frame and rotation they were found on.
+    fn drop_stale_blocks(&mut self) {
+        let stale = match (&self.blocks_key, &self.captured) {
+            (Some((f, r)), Some(c)) => !Arc::ptr_eq(f, c) || *r != self.rotation,
+            (Some(_), None) => true,
+            (None, _) => false,
+        };
+        if stale {
+            self.blocks.clear();
+            self.blocks_key = None;
+            self.selected_block = None;
+            self.read_queue.clear();
         }
     }
 
@@ -411,7 +730,7 @@ impl App {
         if rotation != self.rotation {
             self.rotation = rotation;
             // The crop is in view space; rather than spin it, start over.
-            self.crop = None;
+            self.set_rect(None);
         }
     }
 
@@ -421,9 +740,7 @@ impl App {
             self.say("nothing to save yet");
             return;
         };
-        let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
-        let region = self.crop.unwrap_or(Crop::whole(vw, vh));
-        let (rgba, w, h) = render_region(&frame, self.rotation, region, 1);
+        let (rgba, w, h) = render_selection(&frame, self.rotation, self.selection(), 1);
         let path = self.save_dir.join(format!(
             "pc4l-{}.png",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
@@ -454,9 +771,21 @@ impl App {
             }
             ui.add_enabled_ui(self.crop.is_some(), |ui| {
                 if ui.button("Clear crop  [esc]").clicked() {
-                    self.crop = None;
+                    self.set_rect(None);
                 }
             });
+            if let Some(detector) = &self.detector {
+                let ready = detector.ready() && self.pending_detect.is_none();
+                let button = ui.add_enabled(ready, egui::Button::new("Blocks  [L]"));
+                let button = match detector.status() {
+                    Some(status) => button.on_disabled_hover_text(status),
+                    None => button
+                        .on_hover_text("find the page's blocks; click one or tab through them"),
+                };
+                if button.clicked() {
+                    self.detect();
+                }
+            }
             ui.separator();
             if ui.button("Rotate left  [shift+R]").clicked() {
                 self.rotate(self.rotation.turned_ccw());
@@ -553,6 +882,20 @@ impl App {
                 ui.strong("CAPTURED");
                 ui.weak("preview frozen — space or esc goes back to live");
             }
+            if self.pending_detect.is_some() {
+                ui.separator();
+                ui.spinner();
+                ui.label("detecting blocks");
+            } else if !self.blocks.is_empty() {
+                ui.separator();
+                ui.label(format!(
+                    "{} blocks — click one, tab through them, ctrl+enter reads all",
+                    self.blocks.len()
+                ));
+            } else if let Some(status) = self.detector.as_ref().and_then(|d| d.status()) {
+                ui.separator();
+                ui.weak(status);
+            }
             if let Some((msg, at)) = &self.message {
                 if at.elapsed().as_secs() < 8 {
                     ui.separator();
@@ -568,7 +911,7 @@ impl App {
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
         let step = vw.max(vh).div_ceil(PREVIEW_MAX_EDGE).max(1);
         self.preview
-            .update(ui.ctx(), frame, Crop::whole(vw, vh), step, self.rotation);
+            .update(ui.ctx(), frame, None, step, self.rotation);
         let Some(texture) = &self.preview.texture else {
             return;
         };
@@ -615,12 +958,21 @@ impl App {
                 let here = to_view(pos);
                 match drag {
                     Drag::Draw { origin } => {
-                        self.crop = Crop::from_corners(origin, here).clamped(vw, vh);
+                        let drawn = Crop::from_corners(origin, here).clamped(vw, vh);
+                        // A click (too small to be a box) on a detected block
+                        // selects it; anywhere else it clears the crop.
+                        match (drawn, response.drag_stopped()) {
+                            (None, true) => match self.block_at(origin) {
+                                Some(i) => self.select_block(i),
+                                None => self.set_rect(None),
+                            },
+                            _ => self.set_rect(drawn),
+                        }
                     }
                     Drag::Move { last, box_at_start } => {
                         let (dx, dy) =
                             (here.0 as i64 - last.0 as i64, here.1 as i64 - last.1 as i64);
-                        self.crop = Some(box_at_start.moved(dx, dy, vw, vh));
+                        self.set_rect(Some(box_at_start.moved(dx, dy, vw, vh)));
                     }
                 }
             }
@@ -638,18 +990,37 @@ impl App {
             }
         }
 
-        if let Some(crop) = self.crop {
-            let to_screen = |x: usize, y: usize| {
-                Pos2::new(
-                    image_rect.min.x + x as f32 * scale,
-                    image_rect.min.y + y as f32 * scale,
-                )
+        let to_screen =
+            |x: f32, y: f32| Pos2::new(image_rect.min.x + x * scale, image_rect.min.y + y * scale);
+        let painter = ui.painter_at(image_rect);
+        // Detected blocks: their quads, numbered in reading order.
+        for (i, b) in self.blocks.iter().enumerate() {
+            let selected = self.selected_block == Some(i);
+            let quad = b.quad.unwrap_or_else(|| layout::rect_quad(b.rect));
+            let points: Vec<Pos2> = quad.iter().map(|[x, y]| to_screen(*x, *y)).collect();
+            let colour = if selected {
+                Color32::from_rgb(255, 196, 0)
+            } else {
+                Color32::from_rgb(80, 220, 120)
             };
+            painter.add(Shape::closed_line(
+                points.clone(),
+                Stroke::new(if selected { 2.5 } else { 1.5 }, colour),
+            ));
+            let tag = format!("{}", i + 1);
+            let font = FontId::proportional(13.0);
+            let galley = painter.layout_no_wrap(tag, font, Color32::BLACK);
+            let at = points[0];
+            let bg = Rect::from_min_size(at, galley.size() + Vec2::splat(4.0));
+            painter.rect_filled(bg, 2.0, colour);
+            painter.galley(at + Vec2::splat(2.0), galley, Color32::BLACK);
+        }
+
+        if let Some(crop) = self.crop {
             let rect = Rect::from_min_max(
-                to_screen(crop.x, crop.y),
-                to_screen(crop.x + crop.w, crop.y + crop.h),
+                to_screen(crop.x as f32, crop.y as f32),
+                to_screen((crop.x + crop.w) as f32, (crop.y + crop.h) as f32),
             );
-            let painter = ui.painter_at(image_rect);
             let dim = Color32::from_black_alpha(110);
             // Dim everything outside the crop so the selection reads at a glance.
             for outside in [
@@ -675,6 +1046,16 @@ impl App {
         }
     }
 
+    /// The smallest detected block under a view point, if any.
+    fn block_at(&self, (x, y): (usize, usize)) -> Option<usize> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| b.rect.contains(x, y))
+            .min_by_key(|(_, b)| b.rect.area())
+            .map(|(i, _)| i)
+    }
+
     /// The crop at native pixels (decimated only if it is wider than the preview
     /// budget), scaled to the panel: this is the zoom.
     fn crop_panel(&mut self, ui: &mut egui::Ui, frame: &Arc<YuvFrame>) {
@@ -688,7 +1069,7 @@ impl App {
     }
 
     fn crop_image(&mut self, ui: &mut egui::Ui, frame: &Arc<YuvFrame>) {
-        let Some(crop) = self.crop else {
+        let Some(selection) = self.selection() else {
             ui.vertical_centered(|ui| {
                 ui.add_space(24.0);
                 ui.label("Drag a box on the preview to zoom to a region.");
@@ -701,30 +1082,56 @@ impl App {
                     "Capture freezes the frame; Save writes the box (or the whole frame) \
                      as a PNG at full resolution; Read it sends it to the model.",
                 );
+                if self.detector.is_some() {
+                    ui.label(
+                        "Blocks [L] finds the page's text blocks in reading order: click \
+                         one or tab through them to make it the box; ctrl+enter reads \
+                         them all.",
+                    );
+                }
             });
             return;
         };
+        let crop = selection.rect;
         let step = crop.w.max(crop.h).div_ceil(PREVIEW_MAX_EDGE).max(1);
-        self.crop_view
-            .update(ui.ctx(), frame, crop, step, self.rotation);
+        let (tw, th) = self
+            .crop_view
+            .update(ui.ctx(), frame, Some(selection), step, self.rotation);
         let Some(texture) = &self.crop_view.texture else {
             return;
         };
+        // Native size of what is shown (a rectified quad is its own size).
+        let (nw, nh) = (tw * step, th * step);
+        let block = self
+            .selected_block
+            .and_then(|i| self.blocks.get(i))
+            .map(|b| {
+                format!(
+                    " — block {} ({})",
+                    self.selected_block.unwrap() + 1,
+                    b.label
+                )
+            })
+            .unwrap_or_default();
         ui.label(format!(
-            "{}×{} px at ({}, {}){}",
-            crop.w,
-            crop.h,
+            "{nw}×{nh} px at ({}, {}){}{}{}",
             crop.x,
             crop.y,
+            if selection.quad.is_some() {
+                ", rectified"
+            } else {
+                ""
+            },
             if step > 1 {
                 format!(", shown at 1/{step}")
             } else {
                 String::new()
-            }
+            },
+            block
         ));
         let avail = ui.available_size();
-        let scale = (avail.x / crop.w as f32).min(avail.y / crop.h as f32);
-        let size = Vec2::new(crop.w as f32 * scale, crop.h as f32 * scale);
+        let scale = (avail.x / nw as f32).min(avail.y / nh as f32);
+        let size = Vec2::new(nw as f32 * scale, nh as f32 * scale);
         let response = ui
             .centered_and_justified(|ui| {
                 ui.add(
@@ -741,7 +1148,7 @@ impl App {
             if notches != 0 {
                 let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
                 let factor = 1.1f32.powi(-notches);
-                self.crop = Some(crop.scaled(factor, vw, vh));
+                self.set_rect(Some(crop.scaled(factor, vw, vh)));
             }
         }
     }
@@ -759,6 +1166,9 @@ impl App {
                 if ui.button(what).clicked() {
                     self.read();
                 }
+                if !self.blocks.is_empty() && ui.button("Read all blocks  [ctrl+enter]").clicked() {
+                    self.read_all();
+                }
             });
             let current = self
                 .backends
@@ -772,9 +1182,16 @@ impl App {
                         ui.selectable_value(&mut self.selected_backend, i, b.name());
                     }
                 });
-            if let Some((_, started, name)) = &self.pending {
+            if let Some((_, started, name, label)) = &self.pending {
                 ui.spinner();
-                ui.label(format!("{name}: {:.0}s", started.elapsed().as_secs_f32()));
+                let what = label.as_deref().unwrap_or("");
+                ui.label(format!(
+                    "{name}: {what} {:.0}s",
+                    started.elapsed().as_secs_f32()
+                ));
+                if !self.read_queue.is_empty() {
+                    ui.weak(format!("{} to go", self.read_queue.len()));
+                }
             } else if let Some(status) = self
                 .backends
                 .get(self.selected_backend)
@@ -790,7 +1207,16 @@ impl App {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                for result in self.results.iter().rev() {
+                // One read at a time: newest on top. A "read all": in page order.
+                let in_order = matches!(self.results_key, Some((_, ResultsScope::AllBlocks)));
+                let mut ordered: Vec<_> = self.results.iter().collect();
+                if !in_order {
+                    ordered.reverse();
+                }
+                for (label, result) in ordered {
+                    if let Some(label) = label {
+                        ui.strong(label);
+                    }
                     match result {
                         Ok(t) => show_transcription(ui, t),
                         Err(e) => {
@@ -803,16 +1229,38 @@ impl App {
     }
 
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        let (space, esc, save, rot_cw, rot_ccw, enter) = ctx.input(|i| {
+        let (space, esc, save, rot_cw, rot_ccw, enter, read_all) = ctx.input(|i| {
             (
                 i.key_pressed(Key::Space),
                 i.key_pressed(Key::Escape),
                 i.modifiers.command && i.key_pressed(Key::S),
                 !i.modifiers.shift && i.key_pressed(Key::R),
                 i.modifiers.shift && i.key_pressed(Key::R),
-                i.key_pressed(Key::Enter),
+                !i.modifiers.command && i.key_pressed(Key::Enter),
+                i.modifiers.command && i.key_pressed(Key::Enter),
             )
         });
+        // Blocks: L detects, tab / shift+tab walk them.
+        let (detect, tab) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::L),
+                if i.key_pressed(Key::Tab) {
+                    if i.modifiers.shift {
+                        -1
+                    } else {
+                        1
+                    }
+                } else {
+                    0
+                },
+            )
+        });
+        if detect {
+            self.detect();
+        }
+        if tab != 0 {
+            self.step_block(tab);
+        }
         // Phone zoom: + / - step, 0 resets.
         let (zoom_in, zoom_out, zoom_reset) = ctx.input(|i| {
             (
@@ -847,10 +1295,10 @@ impl App {
                 )
             });
             if grow {
-                self.crop = Some(crop.scaled(1.25, vw, vh));
+                self.set_rect(Some(crop.scaled(1.25, vw, vh)));
             }
             if shrink {
-                self.crop = Some(crop.scaled(0.8, vw, vh));
+                self.set_rect(Some(crop.scaled(0.8, vw, vh)));
             }
             if dx != 0 || dy != 0 {
                 let unit = if fine {
@@ -858,7 +1306,7 @@ impl App {
                 } else {
                     (crop.w.min(crop.h) / 5).max(1)
                 } as i64;
-                self.crop = Some(crop.moved(dx as i64 * unit, dy as i64 * unit, vw, vh));
+                self.set_rect(Some(crop.moved(dx as i64 * unit, dy as i64 * unit, vw, vh)));
             }
         }
         if space {
@@ -867,10 +1315,13 @@ impl App {
         if enter {
             self.read();
         }
+        if read_all {
+            self.read_all();
+        }
         if esc {
             // Back out one level: the box first, then the capture.
             if self.crop.is_some() {
-                self.crop = None;
+                self.set_rect(None);
             } else if self.captured.is_some() {
                 self.capture();
             }
@@ -928,8 +1379,9 @@ impl eframe::App for App {
         self.fps.tick(self.shared().frames());
         self.handle_keys(ui.ctx());
         self.handle_screenshot(ui.ctx());
+        self.drop_stale_blocks();
         self.poll_read();
-        if self.pending.is_some() {
+        if self.pending.is_some() || self.pending_detect.is_some() {
             // Keep the elapsed counter moving even when no frames arrive.
             ui.ctx().request_repaint_after(Duration::from_millis(250));
         }
@@ -950,11 +1402,14 @@ impl eframe::App for App {
         let view = self.rotation.rotated_size(frame.width, frame.height);
         if self.crop_space != Some(view) {
             if self.crop_space.is_some() {
-                self.crop = None;
+                self.set_rect(None);
             }
             self.crop_space = Some(view);
         }
-        self.crop = self.crop.and_then(|c| c.clamped(view.0, view.1));
+        let clamped = self.crop.and_then(|c| c.clamped(view.0, view.1));
+        if clamped != self.crop {
+            self.set_rect(clamped);
+        }
 
         if let Some((zoom, seen)) = &mut self.dev_zoom {
             match seen {
@@ -972,6 +1427,14 @@ impl eframe::App for App {
         if self.dev_read && self.backend_ready() {
             self.dev_read = false;
             self.read();
+        }
+        if self.dev_detect.0 && self.detector.as_ref().is_some_and(|d| d.ready()) {
+            self.dev_detect.0 = false;
+            self.detect();
+        }
+        if self.dev_detect.1 && !self.blocks.is_empty() && self.backend_ready() {
+            self.dev_detect.1 = false;
+            self.read_all();
         }
 
         let side = ui.available_width() * 0.4;

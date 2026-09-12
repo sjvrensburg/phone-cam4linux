@@ -10,7 +10,6 @@
 use anyhow::{anyhow, bail, Context, Result};
 use image::{imageops::FilterType, RgbImage};
 use ndarray::{Array, ArrayD, IxDyn};
-use ort::ep::{ExecutionProviderDispatch, WebGPU, CPU};
 use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
@@ -340,21 +339,9 @@ impl Model {
         device: Device,
         max_image_tokens: usize,
     ) -> Result<Self> {
-        let env = ort::init().build()?;
-        let providers: Vec<ExecutionProviderDispatch> = match device {
-            Device::WebGpu => vec![WebGPU::default().build().error_on_failure()],
-            Device::Cpu => vec![CPU::default().build()],
-        };
         let open = |name: &str| -> Result<Session> {
             let path = dir.join("onnx").join(format!("{name}_{variant}.onnx"));
-            let t = Instant::now();
-            let session = Session::builder(&env)?
-                .with_execution_providers(providers.clone())
-                .map_err(|e| anyhow!("registering the {} execution provider: {e}", device.name()))?
-                .commit_from_file(&path)
-                .with_context(|| format!("loading {}", path.display()))?;
-            log::debug!("loaded {name} in {:.2}s", t.elapsed().as_secs_f64());
-            Ok(session)
+            super::open_session(&path, device)
         };
         let vision = open("vision_encoder")?;
         let embed = open("embed_tokens")?;

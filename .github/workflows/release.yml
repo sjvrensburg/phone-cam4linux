@@ -1,9 +1,9 @@
 name: Release
 
 # Tag `vX.Y.Z` -> a GitHub release with:
-#   pc4l-vX.Y.Z-x86_64-linux.tar.gz        pc4l, pc4l-gui, libwebgpu_dawn.so, docs, contrib/
-#   pc4l-model-glm-ocr-onnx-q4f16.tar.gz   the built-in model (~650 MB), extracts to models/
-# Extracting both into one directory gives pc4l-gui the model beside the binary, with no
+#   pc4l-vX.Y.Z-x86_64-linux.tar.gz    pc4l, pc4l-gui, libwebgpu_dawn.so, docs, contrib/
+#   pc4l-models-vX.Y.Z.tar.gz          the built-in models (~780 MB), extract to models/
+# Extracting both into one directory gives pc4l-gui the models beside the binary, with no
 # download at first run. The model archive is built by the binary's own --fetch-model, so it
 # is verified against the same checksums the app enforces.
 
@@ -61,16 +61,16 @@ jobs:
           echo "archive=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
-      - name: Package model
+      - name: Package models
         id: model
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           mkdir -p dist/model/models
           target/release/pc4l-gui --fetch-model dist/model/models
-          dir=$(ls dist/model/models)
-          tar -C dist/model -czf "dist/pc4l-model-${dir}.tar.gz" "models/${dir}"
-          echo "archive=dist/pc4l-model-${dir}.tar.gz" >> "$GITHUB_OUTPUT"
+          ls dist/model/models
+          tar -C dist/model -czf "dist/pc4l-models-${GITHUB_REF_NAME}.tar.gz" models
+          echo "archive=dist/pc4l-models-${GITHUB_REF_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Checksums
         run: |

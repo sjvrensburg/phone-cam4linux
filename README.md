@@ -57,10 +57,10 @@ Debian 13 and later -- and a CPU with AVX2, both requirements of the built-in mo
 prebuilt ONNX Runtime): download `pc4l-<version>-x86_64-linux.tar.gz` from the
 [releases page](https://github.com/sjvrensburg/phone-cam4linux/releases) and extract
 it anywhere; it contains `pc4l`, `pc4l-gui`, the `libwebgpu_dawn.so` the GUI's GPU path
-needs (found next to the binary), and `contrib/`. The built-in transcription model
-(~650 MB) is fetched on first use, or extract `pc4l-model-glm-ocr-onnx-q4f16.tar.gz`
-from the same release into the same directory to have it offline
-(`models/` beside the binaries). `SHA256SUMS.txt` covers both archives.
+needs (found next to the binary), and `contrib/`. The built-in models (~780 MB:
+transcription and block detection) are fetched on first use, or extract
+`pc4l-models-<version>.tar.gz` from the same release into the same directory to have
+them offline (`models/` beside the binaries). `SHA256SUMS.txt` covers both archives.
 
 **From source**:
 
@@ -72,7 +72,7 @@ needs a Rust toolchain, `nasm` (OpenH264 assembly), `libclang` (bindgen for the 
 bindings), and for the GUI `libxkbcommon` and `libwayland` development files. The first
 build downloads the pinned `scrcpy-server` jar and (for the GUI) prebuilt ONNX Runtime
 binaries; `cargo build --release -p pc4l-gui --no-default-features` skips the latter and
-the built-in model. `pc4l-gui --fetch-model DIR` downloads the model into `DIR/` with
+the built-in models. `pc4l-gui --fetch-model DIR` downloads the models into `DIR/` with
 checksum verification, for machines that will be offline (set `HF_TOKEN` to a Hugging
 Face token if anonymous downloads are being rate-limited; the files are public).
 
@@ -150,15 +150,28 @@ live in `~/.config/pc4l/gui.toml` (written with defaults on first run):
   `temperature` and shows the spread.
 - `kind = "hint-api"` -- halo-workbench's `/hint/read`.
 
-The built-in model's ~658 MB of files are not inside the binary. They are looked for
-in `$PC4L_MODEL_DIR`, then `models/glm-ocr-onnx-q4f16/` next to the executable (how
-a release tarball can ship them), then `~/.cache/pc4l/models/glm-ocr-onnx-q4f16/`;
-if none has them, they are downloaded there on first run from a pinned Hugging Face
-revision, each file verified against a sha256 compiled into the app, with progress
-shown in the window. Reads are refused until the model is ready.
+**Blocks** (`L`) runs the built-in layout model,
+[PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3), over the
+captured page: every text block, formula, figure and so on, numbered in the reading
+order the model predicts, drawn on the preview. Click a block or `tab`/`shift+tab`
+through them to make it the region; **Read all blocks** (`ctrl+enter`) reads them one
+after the other and lists the readings in page order. The model predicts multi-point
+boxes, so on a curved or tilted page a block is a quadrilateral, not a rectangle; such a
+block is perspective-rectified before it is shown and read. About 0.1 s on the GPU,
+0.3 s on the CPU. `[layout]` in `gui.toml` turns it off, picks the device, and sets the
+score threshold (0.4: handwriting scores lower than the printed pages it was trained on).
 
-Keys: `space` capture/retake, `enter` read, `esc` clear the region (then retake),
-`R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`).
+The built-in models' files (~658 MB for GLM-OCR, 130 MB for the layout model) are not
+inside the binary. Each is looked for in `$PC4L_MODEL_DIR/<name>/`, then
+`models/<name>/` next to the executable (how a release tarball can ship them), then
+`~/.cache/pc4l/models/<name>/` (`glm-ocr-onnx-q4f16`, `pp-doclayoutv3-onnx`); if
+none has it, it is downloaded there on first run from a pinned Hugging Face revision,
+each file verified against a sha256 compiled into the app, with progress shown in the
+window. Reads and detection are refused until the model is ready.
+
+Keys: `space` capture/retake, `enter` read, `L` detect blocks, `tab`/`shift+tab`
+next/previous block, `ctrl+enter` read all blocks, `esc` clear the region (then
+retake), `R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`).
 Phone zoom: the slider, the wheel over the preview, `+`/`-`, `0` to reset. The
 region: drag inside it to move it, arrow keys to nudge (`shift` for one pixel),
 `[`/`]` or the wheel over the zoomed view to shrink/grow it. `--resolution` defaults to
@@ -203,8 +216,8 @@ exercises the loopback/format-negotiation/write path independently of ADB/hardwa
 
 - Verified end-to-end against a real device (Samsung SM-A307FN running Android 13
   via crDroid) at 1920x1080, 2992x2992 (openh264) and 4000x3000 (ffmpeg), including
-  the GUI, live zoom/torch, and the built-in model on a Radeon 8060S (RADV) via WebGPU.
-- The GUI's built-in model runs on WebGPU (Vulkan on Linux), an execution provider ONNX
+  the GUI, live zoom/torch, and the built-in models on a Radeon 8060S (RADV) via WebGPU.
+- The GUI's built-in models run on WebGPU (Vulkan on Linux), an execution provider ONNX
   Runtime still calls experimental; it falls back to the CPU if the provider cannot be
   set up, but a GPU driver fault mid-inference takes the process down. Images are
   capped at 2048 image tokens for that reason.
@@ -223,4 +236,5 @@ Apache-2.0 (see `LICENSE`). `NOTICE` lists the third-party components this proje
 embeds, downloads or links -- notably the upstream `scrcpy-server` (Apache-2.0),
 OpenH264 built from source (BSD-2-Clause; Cisco's H.264 royalty coverage applies only to
 Cisco's own binaries), ONNX Runtime and Dawn (MIT / BSD-3-Clause), the GLM-OCR model
-(MIT), and preprocessing code ported from oar-ocr (Apache-2.0).
+(MIT), the PP-DocLayoutV3 model and the post-processing ported from PaddleX (Apache-2.0),
+and preprocessing code ported from oar-ocr (Apache-2.0).
