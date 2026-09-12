@@ -4,6 +4,8 @@ use phone_cam4linux::adb::AdbDevice;
 use phone_cam4linux::cameras::is_usable_size;
 use phone_cam4linux::{decode, loopback, sink::V4l2Sink, CameraInfo, ConnectOptions, Facing};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// Stream an Android phone's camera to a Linux V4L2 device.
@@ -41,6 +43,12 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     bitrate: u32,
 
+    /// Exit when the phone disconnects or the stream fails, instead of waiting for it
+    /// to come back and reconnecting (the default, so the virtual camera survives a
+    /// cable wiggle or a phone reboot).
+    #[arg(long)]
+    no_reconnect: bool,
+
     /// Skip ADB/phone entirely and feed the V4L2 sink a synthetic color-bar pattern.
     /// Useful for testing the loopback/format/sink path without hardware attached.
     #[arg(long)]
@@ -65,8 +73,10 @@ fn main() -> Result<()> {
     loopback::ensure_device(video_nr, "Android Cam")
         .context("could not prepare the v4l2loopback device")?;
 
+    let stop = install_ctrlc_handler()?;
+
     if args.test_pattern {
-        return run_test_pattern(&args.device);
+        return run_test_pattern(&args.device, &stop);
     }
 
     let facing = match args.facing {
@@ -101,13 +111,84 @@ fn main() -> Result<()> {
         bitrate_bps: Some(args.bitrate.saturating_mul(1_000_000)),
     };
 
-    let mut session =
-        phone_cam4linux::CameraSession::connect(opts).context("connecting to phone camera")?;
-    log::info!("streaming to {}", args.device.display());
-    session
-        .run_to_v4l2(&args.device)
-        .context("streaming camera to V4L2 device")?;
+    stream_loop(&args.device, opts, !args.no_reconnect, &stop)
+}
+
+/// First Ctrl-C asks the pipeline to wind down cleanly (server stopped, adb forward
+/// removed); a second one exits immediately in case the first is stuck.
+fn install_ctrlc_handler() -> Result<Arc<AtomicBool>> {
+    let stop = Arc::new(AtomicBool::new(false));
+    let flag = Arc::clone(&stop);
+    ctrlc::set_handler(move || {
+        if flag.swap(true, Ordering::Relaxed) {
+            eprintln!("second interrupt, exiting immediately");
+            std::process::exit(130);
+        }
+        log::info!("interrupted, shutting down");
+    })
+    .context("installing Ctrl-C handler")?;
+    Ok(stop)
+}
+
+/// Connects and streams, reconnecting after failures (with backoff) when `reconnect`
+/// is set, until `stop` is raised. The V4L2 sink is kept open across reconnects so
+/// consumers (a browser, OBS) don't see the device disappear.
+fn stream_loop(
+    device: &std::path::Path,
+    opts: ConnectOptions,
+    reconnect: bool,
+    stop: &AtomicBool,
+) -> Result<()> {
+    const MIN_BACKOFF: Duration = Duration::from_secs(1);
+    const MAX_BACKOFF: Duration = Duration::from_secs(10);
+
+    let mut sink: Option<V4l2Sink> = None;
+    let mut backoff = MIN_BACKOFF;
+    while !stop.load(Ordering::Relaxed) {
+        let outcome = phone_cam4linux::CameraSession::connect(opts.clone())
+            .context("connecting to phone camera")
+            .and_then(|mut session| {
+                let (w, h) = (session.meta.width, session.meta.height);
+                if sink.as_ref().is_some_and(|s| s.size() != (w, h)) {
+                    log::info!("stream size changed, reopening {}", device.display());
+                    sink = None;
+                }
+                let sink = match &mut sink {
+                    Some(s) => s,
+                    None => {
+                        log::info!("streaming {w}x{h} to {}", device.display());
+                        sink.insert(V4l2Sink::open(device, w, h).context("opening V4L2 sink")?)
+                    }
+                };
+                // A healthy connection resets the backoff for the *next* failure.
+                backoff = MIN_BACKOFF;
+                session
+                    .run(sink, stop)
+                    .context("streaming camera to V4L2 device")
+            });
+
+        match outcome {
+            Ok(()) if stop.load(Ordering::Relaxed) => return Ok(()),
+            Ok(()) => log::warn!("stream ended"),
+            Err(e) if !reconnect => return Err(e),
+            Err(e) => log::warn!("{e:#}"),
+        }
+        if !reconnect {
+            return Ok(());
+        }
+
+        log::info!("reconnecting in {backoff:?} (Ctrl-C to quit)");
+        sleep_unless_stopped(backoff, stop);
+        backoff = (backoff * 2).min(MAX_BACKOFF);
+    }
     Ok(())
+}
+
+fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) {
+    let deadline = std::time::Instant::now() + total;
+    while !stop.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 fn video_nr_from_path(path: &std::path::Path) -> Result<u32> {
@@ -176,7 +257,7 @@ fn parse_resolution(s: &str) -> Result<(u32, u32)> {
 
 /// Drives the V4L2 sink with a synthetic, cycling color-bar frame -- exercises the
 /// loopback/format-negotiation/write path independently of ADB or a real phone.
-fn run_test_pattern(device: &std::path::Path) -> Result<()> {
+fn run_test_pattern(device: &std::path::Path, stop: &AtomicBool) -> Result<()> {
     const WIDTH: u32 = 640;
     const HEIGHT: u32 = 480;
 
@@ -200,7 +281,7 @@ fn run_test_pattern(device: &std::path::Path) -> Result<()> {
     ];
 
     let mut frame_idx: usize = 0;
-    loop {
+    while !stop.load(Ordering::Relaxed) {
         let shift = frame_idx / 8;
         for row in 0..HEIGHT as usize {
             for pair in 0..(WIDTH as usize / 2) {
@@ -217,4 +298,5 @@ fn run_test_pattern(device: &std::path::Path) -> Result<()> {
         frame_idx = frame_idx.wrapping_add(1);
         std::thread::sleep(Duration::from_millis(1000 / 30));
     }
+    Ok(())
 }

@@ -72,8 +72,11 @@ pub fn read_frame_packet<R: Read>(r: &mut R) -> Result<Option<FramePacket>> {
     let size = u32::from_be_bytes(header[8..12].try_into().unwrap()) as usize;
 
     let mut data = vec![0u8; size];
-    r.read_exact(&mut data)
-        .map_err(|e| Error::Protocol(format!("reading frame payload ({size} bytes): {e}")))?;
+    r.read_exact(&mut data).map_err(|e| match e.kind() {
+        // Keep interruptions/timeouts distinguishable for the caller (see session.rs).
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::Other => Error::Io(e),
+        _ => Error::Protocol(format!("reading frame payload ({size} bytes): {e}")),
+    })?;
 
     Ok(Some(FramePacket {
         is_config: pts_and_flags & FLAG_CONFIG != 0,

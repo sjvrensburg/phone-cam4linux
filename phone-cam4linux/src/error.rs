@@ -14,6 +14,9 @@ pub enum Error {
     #[error("unexpected scrcpy protocol data: {0}")]
     Protocol(String),
 
+    #[error("video stream stalled: no data from the phone for {0:?}")]
+    StreamStalled(std::time::Duration),
+
     #[error("H.264 decode error: {0}")]
     Decode(String),
 

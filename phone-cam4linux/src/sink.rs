@@ -51,6 +51,11 @@ impl V4l2Sink {
         })
     }
 
+    /// The `(width, height)` this sink was negotiated at.
+    pub fn size(&self) -> (u32, u32) {
+        (self.width, self.height)
+    }
+
     fn stream(&mut self) -> Result<&mut MmapStream<'static>> {
         if self.stream.is_none() {
             let stream = MmapStream::with_buffers(&self.device, Type::VideoOutput, 4)

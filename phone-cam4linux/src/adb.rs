@@ -151,10 +151,15 @@ fn adb(pre_args: &[&str], args: &[&str]) -> Result<String> {
 }
 
 fn spawn_adb(args: &[&str]) -> Result<Child> {
+    use std::os::unix::process::CommandExt;
     let bin = adb_binary()?;
     log::debug!("adb {} (background)", args.join(" "));
     Ok(Command::new(bin)
         .args(args)
+        // Detach from the terminal's process group so a Ctrl-C reaches only us; we
+        // then stop the server deliberately (and remove the adb forward) in
+        // `CameraSession`'s Drop instead of racing the shell's own SIGINT.
+        .process_group(0)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

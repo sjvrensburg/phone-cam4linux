@@ -9,9 +9,11 @@ use crate::sink::V4l2Sink;
 use std::io::BufReader;
 use std::net::TcpStream;
 use std::path::Path;
+use std::io::Read;
 use std::process::Child;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Facing {
@@ -53,6 +55,11 @@ impl Default for ConnectOptions {
 }
 
 pub(crate) const SERVER_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scrcpy-server.jar"));
+
+/// How long the stream may go without a single byte before the session is declared
+/// dead. The camera produces frames continuously (even `--fps 1` is well inside
+/// this), so silence means the phone, cable, or server went away.
+pub const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct CameraSession {
     device: AdbDevice,
@@ -141,12 +148,34 @@ impl CameraSession {
         })
     }
 
-    /// Blocks, decoding the camera stream and writing frames to `device` (a
-    /// `/dev/videoN` v4l2loopback node) until the stream ends or an error occurs.
+    /// Convenience for [`Self::run`]: opens `device_path` (a `/dev/videoN` v4l2loopback
+    /// node) at the stream's size and runs until the stream ends or fails.
     pub fn run_to_v4l2(&mut self, device_path: &Path) -> Result<()> {
-        let mut decoder = Decoder::new()?;
         let mut sink = V4l2Sink::open(device_path, self.meta.width, self.meta.height)?;
+        self.run(&mut sink, &AtomicBool::new(false))
+    }
+
+    /// Blocks, decoding the camera stream and writing frames to `sink` (which must
+    /// have been opened at [`Self::meta`]'s size) until:
+    ///
+    /// - `stop` becomes true (checked at least every 500 ms) -> `Ok(())`;
+    /// - the phone closes the stream -> `Ok(())`;
+    /// - nothing arrives for [`STALL_TIMEOUT`] -> [`Error::StreamStalled`];
+    /// - any other error.
+    pub fn run(&mut self, sink: &mut V4l2Sink, stop: &AtomicBool) -> Result<()> {
+        let mut decoder = Decoder::new()?;
         let mut yuyv = vec![0u8; (self.meta.width * self.meta.height * 2) as usize];
+
+        // A short socket timeout lets us notice `stop` and stalls between reads
+        // without losing partial packets: `Interruptible` retries the *same* read.
+        self.socket
+            .get_ref()
+            .set_read_timeout(Some(Duration::from_millis(500)))?;
+        let mut reader = Interruptible {
+            inner: &mut self.socket,
+            stop,
+            last_data: Instant::now(),
+        };
 
         // A document camera may run for hours; a single corrupt packet (dropped
         // reference frame, bit error over USB) shouldn't kill the session. We skip
@@ -158,7 +187,24 @@ impl CameraSession {
         let mut decoded_any = false;
 
         let mut stats = StreamStats::default();
-        while let Some(packet) = protocol::read_frame_packet(&mut self.socket)? {
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                return Ok(());
+            }
+            let packet = match protocol::read_frame_packet(&mut reader) {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    log::info!("phone closed the video stream");
+                    return Ok(());
+                }
+                Err(Error::Io(e)) if e.get_ref().is_some_and(|i| i.is::<StopRequested>()) => {
+                    return Ok(());
+                }
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::TimedOut => {
+                    return Err(Error::StreamStalled(STALL_TIMEOUT));
+                }
+                Err(e) => return Err(e),
+            };
             stats.packet(packet.data.len());
             match decoder.decode(&packet.data) {
                 Ok(Some(frame)) => {
@@ -189,8 +235,56 @@ impl CameraSession {
                 }
             }
         }
+    }
+}
 
-        Ok(())
+/// Marker payload of the `io::Error` used to unwind out of a blocking read when the
+/// caller's stop flag is raised.
+#[derive(Debug)]
+struct StopRequested;
+
+impl std::fmt::Display for StopRequested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stop requested")
+    }
+}
+
+impl std::error::Error for StopRequested {}
+
+/// Wraps the socket so that read timeouts become opportunities to check the stop
+/// flag and the stall deadline, transparently resuming the read otherwise.
+struct Interruptible<'a, R: Read> {
+    inner: &'a mut R,
+    stop: &'a AtomicBool,
+    last_data: Instant,
+}
+
+impl<R: Read> Read for Interruptible<'_, R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        loop {
+            match self.inner.read(buf) {
+                Ok(n) => {
+                    self.last_data = Instant::now();
+                    return Ok(n);
+                }
+                Err(e) if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+                {
+                    if self.stop.load(Ordering::Relaxed) {
+                        return Err(std::io::Error::other(StopRequested));
+                    }
+                    if self.last_data.elapsed() > STALL_TIMEOUT {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::TimedOut,
+                            "stream stalled",
+                        ));
+                    }
+                }
+                Err(e) => return Err(e),
+            }
+        }
     }
 }
 
