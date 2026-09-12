@@ -8,6 +8,7 @@
 //! frame only to fetch pixels ([`Crop::to_source`]).
 
 use crate::stream::{Shared, Status, Worker};
+use crate::transcribe::{Mode, Transcriber, Transcription};
 use egui::{
     Color32, ColorImage, Key, Pos2, Rect, Sense, Stroke, StrokeKind, TextureHandle, TextureOptions,
     Vec2,
@@ -16,6 +17,7 @@ use phone_cam4linux::convert::{i420_region_to_rgba, region_size, rotate_rgba, Ro
 use phone_cam4linux::decode::YuvFrame;
 use phone_cam4linux::Facing;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -162,13 +164,30 @@ pub struct App {
     /// View size the crop was drawn against; a different frame size (camera switch)
     /// invalidates it.
     crop_space: Option<(usize, usize)>,
+    backends: Vec<Arc<dyn Transcriber>>,
+    selected_backend: usize,
+    /// For waking the UI from the read thread; set on the first frame.
+    ctx: Option<egui::Context>,
+    /// A read in flight: its result channel, when it started, and which backend.
+    pending: Option<(Receiver<anyhow::Result<Transcription>>, Instant, String)>,
+    /// Readings for the current capture + crop, oldest first.
+    results: Vec<Result<Transcription, String>>,
+    /// What `results` were read from; they are dropped when it changes.
+    results_key: Option<(Arc<YuvFrame>, Option<Crop>)>,
+    /// Development aid: read once, as soon as a frame is available.
+    dev_read: bool,
     /// Development aid: write a screenshot of the window to this path after the
     /// delay, then quit.
     screenshot: Option<(Duration, PathBuf, Instant)>,
 }
 
 impl App {
-    pub fn new(worker: Worker, save_dir: PathBuf, screenshot: Option<(Duration, PathBuf)>) -> Self {
+    pub fn new(
+        worker: Worker,
+        save_dir: PathBuf,
+        backends: Vec<Arc<dyn Transcriber>>,
+        screenshot: Option<(Duration, PathBuf)>,
+    ) -> Self {
         Self {
             worker,
             preview: View::new("preview"),
@@ -181,8 +200,19 @@ impl App {
             message: None,
             fps: FpsCounter::default(),
             crop_space: None,
+            backends,
+            selected_backend: 0,
+            ctx: None,
+            pending: None,
+            results: Vec::new(),
+            results_key: None,
+            dev_read: false,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
         }
+    }
+
+    pub fn set_dev_read(&mut self, on: bool) {
+        self.dev_read = on;
     }
 
     pub fn set_rotation(&mut self, rotation: Rotation) {
@@ -214,6 +244,82 @@ impl App {
         } else if let Some(frame) = self.shared().latest() {
             self.say(format!("captured {}x{}", frame.width, frame.height));
             self.captured = Some(frame);
+        }
+    }
+
+    /// Sends the crop (or the whole view) to the selected backend on a thread.
+    /// Reading a live frame freezes it first, so the answer stays next to its ink.
+    fn read(&mut self) {
+        if self.pending.is_some() {
+            self.say("still reading the last one");
+            return;
+        }
+        let Some(backend) = self.backends.get(self.selected_backend).cloned() else {
+            self.say("no transcription backends configured (see ~/.config/pc4l/gui.toml)");
+            return;
+        };
+        if self.captured.is_none() {
+            self.capture();
+        }
+        let Some(frame) = self.captured.clone() else {
+            self.say("nothing to read yet");
+            return;
+        };
+        let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
+        let (region, mode) = match self.crop {
+            Some(c) => (c, Mode::Crop),
+            None => (Crop::whole(vw, vh), Mode::Page),
+        };
+        let (rgba, w, h) = render_region(&frame, self.rotation, region, 1);
+        let mut png = Vec::new();
+        let encoded = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+            .expect("buffer matches size")
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png);
+        if let Err(e) = encoded {
+            self.say(format!("encoding the crop failed: {e}"));
+            return;
+        }
+        let (tx, rx) = mpsc::sync_channel(1);
+        let ctx = self.ctx.clone();
+        let name = backend.name().to_string();
+        std::thread::Builder::new()
+            .name("pc4l-read".into())
+            .spawn(move || {
+                let result = backend.read(&png, mode, (vw as u32, vh as u32));
+                let _ = tx.send(result);
+                if let Some(ctx) = ctx {
+                    ctx.request_repaint();
+                }
+            })
+            .expect("spawning read thread");
+        self.pending = Some((rx, Instant::now(), name));
+    }
+
+    /// Collects a finished read, and drops readings that no longer belong to what is
+    /// on screen.
+    fn poll_read(&mut self) {
+        if let Some((rx, _, _)) = &self.pending {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.results.push(result.map_err(|e| format!("{e:#}")));
+                    self.pending = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.results.push(Err("the read thread died".into()));
+                    self.pending = None;
+                }
+            }
+        }
+        let key = self.captured.clone().map(|f| (f, self.crop));
+        let same = match (&self.results_key, &key) {
+            (Some((a, ca)), Some((b, cb))) => Arc::ptr_eq(a, b) && ca == cb,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.results.clear();
+            self.results_key = key;
         }
     }
 
@@ -414,13 +520,23 @@ impl App {
     /// The crop at native pixels (decimated only if it is wider than the preview
     /// budget), scaled to the panel: this is the zoom.
     fn crop_panel(&mut self, ui: &mut egui::Ui, frame: &Arc<YuvFrame>) {
+        // The zoomed region on top, the reading controls and results below it.
+        let read_height = (ui.available_height() * 0.45).max(160.0);
+        egui::Panel::bottom("read")
+            .resizable(true)
+            .default_size(read_height)
+            .show(ui, |ui| self.read_section(ui));
+        egui::CentralPanel::default().show(ui, |ui| self.crop_image(ui, frame));
+    }
+
+    fn crop_image(&mut self, ui: &mut egui::Ui, frame: &Arc<YuvFrame>) {
         let Some(crop) = self.crop else {
             ui.vertical_centered(|ui| {
                 ui.add_space(24.0);
                 ui.label("Drag a box on the preview to zoom to a region.");
                 ui.label(
                     "Capture freezes the frame; Save writes the box (or the whole frame) \
-                     as a PNG at full resolution.",
+                     as a PNG at full resolution; Read it sends it to the model.",
                 );
             });
             return;
@@ -451,18 +567,72 @@ impl App {
         });
     }
 
+    /// Backend picker, the Read button, and the readings so far.
+    fn read_section(&mut self, ui: &mut egui::Ui) {
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let what = if self.crop.is_some() {
+                "Read the box  [enter]"
+            } else {
+                "Read the page  [enter]"
+            };
+            ui.add_enabled_ui(self.pending.is_none() && !self.backends.is_empty(), |ui| {
+                if ui.button(what).clicked() {
+                    self.read();
+                }
+            });
+            let current = self
+                .backends
+                .get(self.selected_backend)
+                .map(|b| b.name().to_string())
+                .unwrap_or_else(|| "no backends".into());
+            egui::ComboBox::from_id_salt("backend")
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (i, b) in self.backends.iter().enumerate() {
+                        ui.selectable_value(&mut self.selected_backend, i, b.name());
+                    }
+                });
+            if let Some((_, started, name)) = &self.pending {
+                ui.spinner();
+                ui.label(format!("{name}: {:.0}s", started.elapsed().as_secs_f32()));
+            }
+            if !self.results.is_empty() && ui.small_button("clear").clicked() {
+                self.results.clear();
+            }
+        });
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                for result in self.results.iter().rev() {
+                    match result {
+                        Ok(t) => show_transcription(ui, t),
+                        Err(e) => {
+                            ui.colored_label(ui.visuals().error_fg_color, e);
+                        }
+                    }
+                    ui.separator();
+                }
+            });
+    }
+
     fn handle_keys(&mut self, ctx: &egui::Context) {
-        let (space, esc, save, rot_cw, rot_ccw) = ctx.input(|i| {
+        let (space, esc, save, rot_cw, rot_ccw, enter) = ctx.input(|i| {
             (
                 i.key_pressed(Key::Space),
                 i.key_pressed(Key::Escape),
                 i.modifiers.command && i.key_pressed(Key::S),
                 !i.modifiers.shift && i.key_pressed(Key::R),
                 i.modifiers.shift && i.key_pressed(Key::R),
+                i.key_pressed(Key::Enter),
             )
         });
         if space {
             self.capture();
+        }
+        if enter {
+            self.read();
         }
         if esc {
             self.crop = None;
@@ -514,9 +684,17 @@ impl App {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        if self.ctx.is_none() {
+            self.ctx = Some(ui.ctx().clone());
+        }
         self.fps.tick(self.shared().frames());
         self.handle_keys(ui.ctx());
         self.handle_screenshot(ui.ctx());
+        self.poll_read();
+        if self.pending.is_some() {
+            // Keep the elapsed counter moving even when no frames arrive.
+            ui.ctx().request_repaint_after(Duration::from_millis(250));
+        }
 
         egui::Panel::top("toolbar").show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui));
@@ -540,6 +718,10 @@ impl eframe::App for App {
         }
         self.crop = self.crop.and_then(|c| c.clamped(view.0, view.1));
 
+        if std::mem::take(&mut self.dev_read) {
+            self.read();
+        }
+
         let side = ui.available_width() * 0.4;
         egui::Panel::right("crop")
             .resizable(true)
@@ -550,6 +732,50 @@ impl eframe::App for App {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.worker.stop();
+    }
+}
+
+/// One backend's answer: every distinct reading with its support, and what did not
+/// come back. Text is selectable, with a copy button, since the point is to use it.
+fn show_transcription(ui: &mut egui::Ui, t: &Transcription) {
+    ui.horizontal(|ui| {
+        ui.strong(&t.backend);
+        ui.weak(format!(
+            "{} sample{} in {:.1}s",
+            t.samples,
+            if t.samples == 1 { "" } else { "s" },
+            t.elapsed.as_secs_f32()
+        ));
+    });
+    if t.readings.is_empty() {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            "no answer: every sample came back empty",
+        );
+    }
+    for r in &t.readings {
+        ui.horizontal(|ui| {
+            if t.samples > 1 {
+                ui.weak(format!("{}/{}", r.count, t.samples));
+            }
+            if ui
+                .small_button("copy")
+                .on_hover_text("copy this reading")
+                .clicked()
+            {
+                ui.ctx().copy_text(r.text.clone());
+            }
+            ui.add(egui::Label::new(egui::RichText::new(&r.text).size(18.0)).wrap());
+        });
+        if r.truncated {
+            ui.colored_label(ui.visuals().warn_fg_color, "cut off at the token limit");
+        }
+    }
+    if t.silent > 0 && !t.readings.is_empty() {
+        ui.colored_label(
+            ui.visuals().warn_fg_color,
+            format!("{} of {} answers came back empty", t.silent, t.samples),
+        );
     }
 }
 

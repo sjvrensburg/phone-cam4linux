@@ -87,9 +87,14 @@ systemd user unit.
 
 `crates/pc4l-gui` is the egui document-camera window (`stream.rs`: worker thread with
 the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
-*view* (rotated) coordinates mapped back to the source frame, capture, save). The hidden
-`--screenshot-after SECS --screenshot-path FILE` and `--dev-crop X,Y,W,H` flags let you
-check the UI from a script (GNOME blocks external screenshots of the window).
+*view* (rotated) coordinates mapped back to the source frame, capture, save;
+`transcribe.rs`: the `Transcriber` trait, the OpenAI-compatible and halo-workbench
+`/hint/read` backends, and the `~/.config/pc4l/gui.toml` backend list -- prompts are
+verbatim from halo-workbench's `handwriting.py`, readings are grouped and counted,
+never merged). The hidden `--screenshot-after SECS --screenshot-path FILE`,
+`--dev-crop X,Y,W,H` and `--dev-read` flags let you drive it from a script (GNOME
+blocks external screenshots of the window); `XDG_CONFIG_HOME` points it at a scratch
+backend config.
 
 ### Non-obvious protocol details (hard-won, don't regress)
 

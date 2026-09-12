@@ -4,6 +4,7 @@
 
 mod app;
 mod stream;
+mod transcribe;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -73,6 +74,11 @@ struct Args {
 
     #[arg(long, hide = true)]
     screenshot_path: Option<PathBuf>,
+
+    /// Development aid: read the crop (or page) with the first backend as soon as a
+    /// frame arrives.
+    #[arg(long, hide = true)]
+    dev_read: bool,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -177,10 +183,20 @@ fn main() -> Result<()> {
             })
         })
         .transpose()?;
+    let dev_read = args.dev_read;
     let screenshot = args
         .screenshot_after
         .zip(args.screenshot_path)
         .map(|(secs, path)| (std::time::Duration::from_secs_f32(secs), path));
+
+    let backends: Vec<std::sync::Arc<dyn transcribe::Transcriber>> =
+        match transcribe::Config::load_or_create() {
+            Ok(config) => config.backends.iter().map(|b| b.build().into()).collect(),
+            Err(e) => {
+                log::error!("{e:#}; no transcription backends available");
+                Vec::new()
+            }
+        };
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -194,9 +210,10 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             let worker = Worker::start(config, move || ctx.request_repaint());
-            let mut app = app::App::new(worker, save_dir, screenshot);
+            let mut app = app::App::new(worker, save_dir, backends, screenshot);
             app.set_rotation(rotation);
             app.set_crop(dev_crop);
+            app.set_dev_read(dev_read);
             Ok(Box::new(app))
         }),
     )

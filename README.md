@@ -91,8 +91,15 @@ frame at full resolution.
 ./target/release/pc4l-gui --device /dev/video10  # also feed the loopback device
 ```
 
-Keys: `space` capture/retake, `esc` clear the region, `R`/`shift+R` rotate,
-`ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`). `--resolution` defaults to
+**Read it** sends the box (or the whole page) to a transcription backend and lists
+every distinct answer with how many samples gave it -- several readings are shown as
+several readings, never merged, and an empty answer is reported, not hidden. Backends
+live in `~/.config/pc4l/gui.toml` (written with defaults on first run): any
+OpenAI-compatible chat endpoint with image input (`kind = "open-ai"`: llama-server,
+Ollama, vLLM, OpenAI) or halo-workbench's `/hint/read` (`kind = "hint-api"`).
+
+Keys: `space` capture/retake, `enter` read, `esc` clear the region, `R`/`shift+R`
+rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`). `--resolution` defaults to
 `max`; `--facing`, `--connect`, `--serial`, `--bitrate`, `--fps` and `--decoder`
 are as for `pc4l`. It reconnects with backoff like the CLI.
 
