@@ -15,6 +15,7 @@ conversion, V4L2 sink) is implemented here.
 ```
 cargo build --release                 # fetches scrcpy-server.jar on first build (needs network)
 cargo build --release --features ffmpeg   # + system libavcodec decoder (needs full FFmpeg headers)
+cargo build --release -p pc4l-gui --no-default-features   # GUI without the built-in ONNX model (no ort download)
 cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion, GUI crop geometry)
 cargo test -p phone-cam4linux protocol::tests::parses_codec_meta   # single test
 cargo clippy --workspace --all-targets [--features ffmpeg]
@@ -91,7 +92,19 @@ the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 `transcribe.rs`: the `Transcriber` trait, the OpenAI-compatible and halo-workbench
 `/hint/read` backends, and the `~/.config/pc4l/gui.toml` backend list -- prompts are
 verbatim from halo-workbench's `handwriting.py`, readings are grouped and counted,
-never merged). The hidden `--screenshot-after SECS --screenshot-path FILE`,
+never merged; `local/`: the built-in GLM-OCR -- `local/glmocr.rs` drives the
+onnx-community three-graph ONNX export through `ort` (vision encoder, embeddings,
+merged decoder with an explicit KV cache and the undocumented scalar
+`num_logits_to_keep` input; preprocessing and MRoPE position ids ported from
+oar-ocr-vl's Candle implementation), `local/mod.rs` finds or downloads the model files
+(pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR`, exe-adjacent `models/`,
+then `~/.cache/pc4l/models/`) and wraps it as a `Transcriber` that prepares on a
+thread). `ort` is pinned to a git commit because the published rc.13 has a different
+API; its `download-binaries` fetches pyke's prebuilt ONNX Runtime at build time, and
+the WebGPU provider is a separate `libwebgpu_dawn.so` that lands next to the binary
+(as a symlink into `~/.cache/dfbin` -- copy the real file into a release tarball),
+found via the `$ORIGIN` rpath from `build.rs`. `--no-default-features` builds without
+any of this. The hidden `--screenshot-after SECS --screenshot-path FILE`,
 `--dev-crop X,Y,W,H` and `--dev-read` flags let you drive it from a script (GNOME
 blocks external screenshots of the window); `XDG_CONFIG_HOME` points it at a scratch
 backend config.

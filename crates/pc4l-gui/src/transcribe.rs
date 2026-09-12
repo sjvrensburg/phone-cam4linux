@@ -76,6 +76,11 @@ pub struct Transcription {
 /// a worker thread and may block.
 pub trait Transcriber: Send + Sync {
     fn name(&self) -> &str;
+    /// A line for the window about the backend's own state (downloading, loading,
+    /// unavailable); `None` when there is nothing to say.
+    fn status(&self) -> Option<String> {
+        None
+    }
     /// `capture_px` is the size of the whole frame the crop was cut from, for
     /// backends that warn about low-resolution captures.
     fn read(&self, png: &[u8], mode: Mode, capture_px: (u32, u32)) -> Result<Transcription>;
@@ -114,6 +119,29 @@ pub enum BackendConfig {
         #[serde(default = "default_hint_samples")]
         samples: u32,
     },
+    /// The bundled GLM-OCR on ONNX Runtime (needs the `local-model` build feature).
+    /// Greedy decoding: one reading per request.
+    Local {
+        name: String,
+        #[serde(default)]
+        device: LocalDevice,
+        #[serde(default = "default_max_tokens")]
+        max_tokens: u32,
+    },
+}
+
+#[cfg(feature = "local-model")]
+pub type LocalDevice = crate::local::DevicePref;
+
+/// Accepted and ignored when the feature is off, so one config file serves both builds.
+#[cfg(not(feature = "local-model"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum LocalDevice {
+    #[default]
+    Auto,
+    Webgpu,
+    Cpu,
 }
 
 fn one() -> u32 {
@@ -130,8 +158,9 @@ fn default_hint_samples() -> u32 {
 }
 
 impl BackendConfig {
-    pub fn build(&self) -> Box<dyn Transcriber> {
-        match self.clone() {
+    /// `None` for a backend this build cannot provide.
+    pub fn build(&self) -> Option<Box<dyn Transcriber>> {
+        Some(match self.clone() {
             BackendConfig::OpenAi {
                 name,
                 base_url,
@@ -160,7 +189,18 @@ impl BackendConfig {
                 member,
                 samples: samples.max(1),
             }),
-        }
+            #[cfg(feature = "local-model")]
+            BackendConfig::Local {
+                name,
+                device,
+                max_tokens,
+            } => Box::new(crate::local::LocalBackend::new(name, device, max_tokens)),
+            #[cfg(not(feature = "local-model"))]
+            BackendConfig::Local { name, .. } => {
+                log::warn!("backend {name:?} needs a build with the local-model feature");
+                return None;
+            }
+        })
     }
 }
 
@@ -214,6 +254,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             backends: vec![
+                BackendConfig::Local {
+                    name: "GLM-OCR (built in)".into(),
+                    device: LocalDevice::default(),
+                    max_tokens: 1024,
+                },
                 BackendConfig::HintApi {
                     name: "workbench GLM-OCR".into(),
                     base_url: "http://127.0.0.1:8093".into(),
@@ -532,7 +577,11 @@ mod tests {
         let text = Config::default_text();
         let parsed: Config = toml::from_str(&text).unwrap();
         assert_eq!(parsed, Config::default());
-        assert_eq!(parsed.backends[0].build().name(), "workbench GLM-OCR");
+        assert!(matches!(parsed.backends[0], BackendConfig::Local { .. }));
+        assert_eq!(
+            parsed.backends[1].build().unwrap().name(),
+            "workbench GLM-OCR"
+        );
         // Optional fields may be left out.
         let minimal: Config = toml::from_str(
             "[[backends]]\nkind = \"open-ai\"\nname = \"x\"\nbase_url = \"http://h/v1\"\nmodel = \"m\"\n",

@@ -265,6 +265,9 @@ impl App {
             self.say("nothing to read yet");
             return;
         };
+        // Results belong to this frame and box; a read of something else starts
+        // a fresh list.
+        self.sync_results_key();
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
         let (region, mode) = match self.crop {
             Some(c) => (c, Mode::Crop),
@@ -295,9 +298,23 @@ impl App {
         self.pending = Some((rx, Instant::now(), name));
     }
 
-    /// Collects a finished read, and drops readings that no longer belong to what is
-    /// on screen.
+    /// Drops readings that no longer belong to what is on screen.
+    fn sync_results_key(&mut self) {
+        let key = self.captured.clone().map(|f| (f, self.crop));
+        let same = match (&self.results_key, &key) {
+            (Some((a, ca)), Some((b, cb))) => Arc::ptr_eq(a, b) && ca == cb,
+            (None, None) => true,
+            _ => false,
+        };
+        if !same {
+            self.results.clear();
+            self.results_key = key;
+        }
+    }
+
+    /// Collects a finished read.
     fn poll_read(&mut self) {
+        self.sync_results_key();
         if let Some((rx, _, _)) = &self.pending {
             match rx.try_recv() {
                 Ok(result) => {
@@ -311,16 +328,15 @@ impl App {
                 }
             }
         }
-        let key = self.captured.clone().map(|f| (f, self.crop));
-        let same = match (&self.results_key, &key) {
-            (Some((a, ca)), Some((b, cb))) => Arc::ptr_eq(a, b) && ca == cb,
-            (None, None) => true,
-            _ => false,
-        };
-        if !same {
-            self.results.clear();
-            self.results_key = key;
-        }
+    }
+
+    /// Whether the selected backend can take a read now (a local model may still
+    /// be downloading or loading).
+    fn backend_ready(&self) -> bool {
+        self.backends
+            .get(self.selected_backend)
+            .and_then(|b| b.status())
+            .is_none_or(|s| s.starts_with("ready") || s.starts_with("unavailable"))
     }
 
     fn rotate(&mut self, rotation: Rotation) {
@@ -596,6 +612,12 @@ impl App {
             if let Some((_, started, name)) = &self.pending {
                 ui.spinner();
                 ui.label(format!("{name}: {:.0}s", started.elapsed().as_secs_f32()));
+            } else if let Some(status) = self
+                .backends
+                .get(self.selected_backend)
+                .and_then(|b| b.status())
+            {
+                ui.weak(status);
             }
             if !self.results.is_empty() && ui.small_button("clear").clicked() {
                 self.results.clear();
@@ -718,7 +740,8 @@ impl eframe::App for App {
         }
         self.crop = self.crop.and_then(|c| c.clamped(view.0, view.1));
 
-        if std::mem::take(&mut self.dev_read) {
+        if self.dev_read && self.backend_ready() {
+            self.dev_read = false;
             self.read();
         }
 

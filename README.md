@@ -94,9 +94,24 @@ frame at full resolution.
 **Read it** sends the box (or the whole page) to a transcription backend and lists
 every distinct answer with how many samples gave it -- several readings are shown as
 several readings, never merged, and an empty answer is reported, not hidden. Backends
-live in `~/.config/pc4l/gui.toml` (written with defaults on first run): any
-OpenAI-compatible chat endpoint with image input (`kind = "open-ai"`: llama-server,
-Ollama, vLLM, OpenAI) or halo-workbench's `/hint/read` (`kind = "hint-api"`).
+live in `~/.config/pc4l/gui.toml` (written with defaults on first run):
+
+- `kind = "local"` -- the built-in model, [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR)
+  (0.9B, handwriting and math) as the `onnx-community` q4f16 ONNX export, run through
+  ONNX Runtime on the GPU via WebGPU/Vulkan, falling back to CPU (`device = "auto" |
+  "webgpu" | "cpu"`). About 1 s per crop on a Radeon 8060S, 2 s on its CPU. Greedy, so
+  one reading per request. Needs the default `local-model` cargo feature.
+- `kind = "open-ai"` -- any OpenAI-compatible chat endpoint with image input
+  (llama-server, Ollama, vLLM, OpenAI); `samples > 1` asks several times at
+  `temperature` and shows the spread.
+- `kind = "hint-api"` -- halo-workbench's `/hint/read`.
+
+The built-in model's ~658 MB of files are not inside the binary. They are looked for
+in `$PC4L_MODEL_DIR`, then `models/glm-ocr-onnx-q4f16/` next to the executable (how
+a release tarball can ship them), then `~/.cache/pc4l/models/glm-ocr-onnx-q4f16/`;
+if none has them, they are downloaded there on first run from a pinned Hugging Face
+revision, each file verified against a sha256 compiled into the app, with progress
+shown in the window. Reads are refused until the model is ready.
 
 Keys: `space` capture/retake, `enter` read, `esc` clear the region, `R`/`shift+R`
 rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`). `--resolution` defaults to

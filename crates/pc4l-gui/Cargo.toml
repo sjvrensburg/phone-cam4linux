@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "GUI: live view, crop and capture an Android phone's camera as a document camera"
+build = "build.rs"
 
 [[bin]]
 name = "pc4l-gui"
@@ -25,7 +26,18 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "1"
 base64 = "0.22"
+# local-model: bundled GLM-OCR on ONNX Runtime (WebGPU/Vulkan or CPU).
+# HEAD of pykeio/ort as read on 2026-09-12; its API differs from the published rc.13.
+ort = { git = "https://github.com/pykeio/ort", rev = "bc79f5947d9193244bacfc357556de0b69bb99ea", features = ["half", "webgpu"], optional = true }
+half = { version = "2", optional = true }
+ndarray = { version = "0.17", optional = true }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
+sha2 = { version = "0.10", optional = true }
 
 [features]
-default = []
+default = ["local-model"]
 ffmpeg = ["phone-cam4linux/ffmpeg"]
+# The out-of-the-box transcription model: GLM-OCR (onnx-community q4f16 export) run
+# through ONNX Runtime, WebGPU (Vulkan on Linux) with CPU fallback. Downloads
+# pyke's prebuilt ONNX Runtime at build time and the ~650 MB model on first use.
+local-model = ["dep:ort", "dep:half", "dep:ndarray", "dep:tokenizers", "dep:sha2"]

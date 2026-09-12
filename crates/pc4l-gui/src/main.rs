@@ -3,6 +3,8 @@
 //! the `phone-cam4linux` library; this crate is the window and the reconnect policy.
 
 mod app;
+#[cfg(feature = "local-model")]
+mod local;
 mod stream;
 mod transcribe;
 
@@ -191,7 +193,11 @@ fn main() -> Result<()> {
 
     let backends: Vec<std::sync::Arc<dyn transcribe::Transcriber>> =
         match transcribe::Config::load_or_create() {
-            Ok(config) => config.backends.iter().map(|b| b.build().into()).collect(),
+            Ok(config) => config
+                .backends
+                .iter()
+                .filter_map(|b| b.build().map(Into::into))
+                .collect(),
             Err(e) => {
                 log::error!("{e:#}; no transcription backends available");
                 Vec::new()
