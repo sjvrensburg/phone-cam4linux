@@ -90,7 +90,7 @@ pub fn rectify(img: &RgbaImage, q: &Quad) -> Option<RgbaImage> {
 /// Packed RGBA8 → RGB, for a detector.
 pub fn rgba_to_rgb(rgba: &[u8], w: usize, h: usize) -> RgbImage {
     let mut out = RgbImage::new(w as u32, h as u32);
-    for (dst, src) in out.pixels_mut().zip(rgba.chunks_exact(4)) {
+    for (dst, src) in out.pixels_mut().zip(rgba.as_chunks::<4>().0) {
         *dst = Rgb([src[0], src[1], src[2]]);
     }
     out
