@@ -47,8 +47,10 @@ pub struct FramePacket {
 /// video socket stream.
 pub fn read_codec_meta<R: Read>(r: &mut R) -> Result<CodecMeta> {
     let mut buf = [0u8; 12];
-    r.read_exact(&mut buf)
-        .map_err(|e| Error::Protocol(format!("reading codec metadata: {e}")))?;
+    r.read_exact(&mut buf).map_err(|e| match e.kind() {
+        std::io::ErrorKind::TimedOut | std::io::ErrorKind::Other => Error::Io(e),
+        _ => Error::Protocol(format!("reading codec metadata: {e}")),
+    })?;
     let codec_id = u32::from_be_bytes(buf[0..4].try_into().unwrap());
     if codec_id != CODEC_ID_H264 {
         return Err(Error::Protocol(format!(

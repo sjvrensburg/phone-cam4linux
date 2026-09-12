@@ -59,7 +59,7 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
    Wi-Fi (`adb connect` exits 0 even on failure -- the verdict is in its text).
 2. **`session.rs`** — the orchestrator and public API (`CameraSession`, `ConnectOptions`,
    `Facing`). `connect()` starts the server with a fixed set of scrcpy options and
-   completes the handshake; `run(sink, stop)` is the blocking decode→convert→write loop
+   completes the handshake; `connect_with_stop()`/`run(sink, stop)`; the latter is the blocking decode→convert→write loop
    (stop flag checked per packet / every 500 ms; `STALL_TIMEOUT` of silence →
    `Error::StreamStalled`). The server's stdout/stderr is relayed into `log`.
    **`cameras.rs`** parses the server's `list_camera_sizes=true` report.

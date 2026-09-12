@@ -73,6 +73,7 @@ pub const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct CameraSession {
     decoder_backend: decode::Backend,
+    frames_decoded: u64,
     device: AdbDevice,
     server_process: Child,
     server_log: ServerLog,
@@ -85,6 +86,12 @@ impl CameraSession {
     /// Pushes the embedded scrcpy-server jar, starts it in camera mode, and connects
     /// to its video socket.
     pub fn connect(opts: ConnectOptions) -> Result<Self> {
+        Self::connect_with_stop(opts, &AtomicBool::new(false))
+    }
+
+    /// Like [`Self::connect`], but gives up (cleaning up the server and forward) as
+    /// soon as `stop` is raised while waiting for the server to come up.
+    pub fn connect_with_stop(opts: ConnectOptions, stop: &AtomicBool) -> Result<Self> {
         let device = match (&opts.tcp_address, &opts.serial) {
             (Some(addr), _) => AdbDevice::connect_tcp(addr)?,
             (None, Some(s)) => AdbDevice::with_serial(s.clone()),
@@ -133,12 +140,14 @@ impl CameraSession {
         };
         let server_log = ServerLog::attach(&mut server_process);
 
-        let socket = match connect_with_retry(port, Duration::from_secs(15)) {
+        let socket = match connect_with_retry(port, Duration::from_secs(15), stop) {
             Ok(s) => s,
             Err(e) => return Err(abort(&device, &mut server_process, &server_log, port, e)),
         };
         let mut socket = BufReader::new(socket);
-        let meta = match protocol::read_codec_meta(&mut socket) {
+        // The codec header only arrives once the camera and encoder are up, which can
+        // fail silently on the phone; bound the wait and keep it interruptible.
+        let meta = match read_codec_meta_with_stop(&mut socket, stop) {
             Ok(m) => m,
             Err(e) => return Err(abort(&device, &mut server_process, &server_log, port, e)),
         };
@@ -152,6 +161,7 @@ impl CameraSession {
 
         Ok(Self {
             decoder_backend: opts.decoder,
+            frames_decoded: 0,
             device,
             server_process,
             server_log,
@@ -166,6 +176,12 @@ impl CameraSession {
     pub fn run_to_v4l2(&mut self, device_path: &Path) -> Result<()> {
         let mut sink = V4l2Sink::open(device_path, self.meta.width, self.meta.height)?;
         self.run(&mut sink, &AtomicBool::new(false))
+    }
+
+    /// Frames decoded so far by [`Self::run`] -- lets a reconnect loop tell a session
+    /// that actually worked from one that failed right after the handshake.
+    pub fn frames_decoded(&self) -> u64 {
+        self.frames_decoded
     }
 
     /// Blocks, decoding the camera stream and writing frames to `sink` (which must
@@ -223,6 +239,7 @@ impl CameraSession {
             match decoder.decode(&packet.data) {
                 Ok(Some(frame)) => {
                     stats.frame();
+                    self.frames_decoded += 1;
                     decoded_any = true;
                     consecutive_errors = 0;
                     i420_to_yuyv(&frame, &mut yuyv);
@@ -439,13 +456,16 @@ impl ServerLog {
 /// Connects through the adb forward and keeps reconnecting until the server's dummy
 /// byte arrives -- adb accepts the local TCP connection immediately and only then
 /// tries the device-side socket, so an early connection reads EOF instead.
-fn connect_with_retry(port: u16, timeout: Duration) -> Result<TcpStream> {
-    use std::io::Read;
-
-    let deadline = std::time::Instant::now() + timeout;
+fn connect_with_retry(port: u16, timeout: Duration, stop: &AtomicBool) -> Result<TcpStream> {
+    let deadline = Instant::now() + timeout;
     let addr = format!("127.0.0.1:{port}");
     let mut last_err = String::new();
-    while std::time::Instant::now() < deadline {
+    while Instant::now() < deadline {
+        if stop.load(Ordering::Relaxed) {
+            return Err(Error::Protocol(
+                "interrupted while waiting for the server".into(),
+            ));
+        }
         match TcpStream::connect(&addr) {
             Ok(mut s) => {
                 let mut dummy = [0u8; 1];
@@ -463,4 +483,30 @@ fn connect_with_retry(port: u16, timeout: Duration) -> Result<TcpStream> {
     Err(Error::Protocol(format!(
         "could not reach scrcpy server on {addr} within {timeout:?}: {last_err}"
     )))
+}
+
+/// Reads the codec header with a bounded, `stop`-interruptible wait (the socket keeps
+/// a 500 ms read timeout afterwards; `run` sets its own).
+fn read_codec_meta_with_stop(
+    socket: &mut BufReader<TcpStream>,
+    stop: &AtomicBool,
+) -> Result<protocol::CodecMeta> {
+    socket
+        .get_ref()
+        .set_read_timeout(Some(Duration::from_millis(500)))?;
+    let mut reader = Interruptible {
+        inner: socket,
+        stop,
+        last_data: Instant::now(),
+    };
+    protocol::read_codec_meta(&mut reader).map_err(|e| match e {
+        Error::Io(io) if io.get_ref().is_some_and(|i| i.is::<StopRequested>()) => {
+            Error::Protocol("interrupted while waiting for the codec header".into())
+        }
+        Error::Io(io) if io.kind() == std::io::ErrorKind::TimedOut => Error::Protocol(format!(
+            "no codec header from the server within {STALL_TIMEOUT:?} \
+             (camera or encoder failed to start?)"
+        )),
+        other => other,
+    })
 }

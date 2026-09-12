@@ -140,12 +140,10 @@ fn main() -> Result<()> {
         FacingArg::Back => Facing::Back,
     };
     let resolution = match args.resolution.as_deref() {
-        None => None,
-        Some("max") => Some(largest_decodable_size(
-            &select_device(&args)?,
-            facing,
-            decoder,
-        )?),
+        None => Resolution::PhoneDefault,
+        // Resolved per connection inside stream_loop: the phone may not be there yet,
+        // or a different one may show up after a reconnect.
+        Some("max") => Resolution::Max,
         Some(s) => {
             let (w, h) = parse_resolution(s)?;
             anyhow::ensure!(
@@ -164,7 +162,7 @@ fn main() -> Result<()> {
                 "{w}x{h} is not a multiple of 8 in both dimensions; scrcpy would round it \
                  and the camera then rejects the size. Pick another from --list-sizes"
             );
-            Some((w, h))
+            Resolution::Fixed(w, h)
         }
     };
 
@@ -172,13 +170,20 @@ fn main() -> Result<()> {
         serial: args.serial.clone(),
         tcp_address: args.connect.clone(),
         facing,
-        resolution,
+        resolution: None,
         max_fps: args.fps,
         bitrate_bps: Some(args.bitrate.saturating_mul(1_000_000)),
         decoder,
     };
 
-    stream_loop(&args.device, opts, !args.no_reconnect, &stop)
+    stream_loop(&args, opts, resolution, &stop)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Resolution {
+    PhoneDefault,
+    Max,
+    Fixed(u32, u32),
 }
 
 /// First Ctrl-C (or SIGTERM, e.g. from systemd) asks the pipeline to wind down cleanly (server stopped, adb forward
@@ -201,19 +206,28 @@ fn install_ctrlc_handler() -> Result<Arc<AtomicBool>> {
 /// is set, until `stop` is raised. The V4L2 sink is kept open across reconnects so
 /// consumers (a browser, OBS) don't see the device disappear.
 fn stream_loop(
-    device: &std::path::Path,
+    args: &Args,
     opts: ConnectOptions,
-    reconnect: bool,
+    resolution: Resolution,
     stop: &AtomicBool,
 ) -> Result<()> {
     const MIN_BACKOFF: Duration = Duration::from_secs(1);
     const MAX_BACKOFF: Duration = Duration::from_secs(10);
 
+    let device = args.device.as_path();
+    let reconnect = !args.no_reconnect;
     let mut sink: Option<V4l2Sink> = None;
     let mut backoff = MIN_BACKOFF;
     while !stop.load(Ordering::Relaxed) {
-        let outcome = phone_cam4linux::CameraSession::connect(opts.clone())
-            .context("connecting to phone camera")
+        let outcome = resolve_resolution(args, resolution, opts.facing, opts.decoder)
+            .and_then(|res| {
+                let opts = ConnectOptions {
+                    resolution: res,
+                    ..opts.clone()
+                };
+                phone_cam4linux::CameraSession::connect_with_stop(opts, stop)
+                    .context("connecting to phone camera")
+            })
             .and_then(|mut session| {
                 let (w, h) = (session.meta.width, session.meta.height);
                 if sink.as_ref().is_some_and(|s| s.size() != (w, h)) {
@@ -227,11 +241,16 @@ fn stream_loop(
                         sink.insert(V4l2Sink::open(device, w, h).context("opening V4L2 sink")?)
                     }
                 };
-                // A healthy connection resets the backoff for the *next* failure.
-                backoff = MIN_BACKOFF;
-                session
+                let result = session
                     .run(sink, stop)
-                    .context("streaming camera to V4L2 device")
+                    .context("streaming camera to V4L2 device");
+                // Only a session that actually delivered frames resets the backoff;
+                // one that fails right after the handshake (undecodable mode, camera
+                // that never configures) must keep backing off.
+                if session.frames_decoded() > 0 {
+                    backoff = MIN_BACKOFF;
+                }
+                result
             });
 
         match outcome {
@@ -249,6 +268,23 @@ fn stream_loop(
         backoff = (backoff * 2).min(MAX_BACKOFF);
     }
     Ok(())
+}
+
+fn resolve_resolution(
+    args: &Args,
+    resolution: Resolution,
+    facing: Facing,
+    decoder: Backend,
+) -> Result<Option<(u32, u32)>> {
+    Ok(match resolution {
+        Resolution::PhoneDefault => None,
+        Resolution::Fixed(w, h) => Some((w, h)),
+        Resolution::Max => Some(largest_decodable_size(
+            &select_device(args)?,
+            facing,
+            decoder,
+        )?),
+    })
 }
 
 fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) {

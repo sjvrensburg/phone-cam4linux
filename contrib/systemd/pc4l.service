@@ -12,7 +12,6 @@
 # Adjust ExecStart for --facing/--resolution/--bitrate/--connect as needed.
 [Unit]
 Description=Android phone camera as V4L2 webcam (phone-cam4linux)
-After=default.target
 
 [Service]
 Type=simple
