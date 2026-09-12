@@ -24,7 +24,7 @@ cargo fmt --all -- --check             # CI enforces this and clippy -D warnings
 
 `pc4l-gui --rotate 270 --screenshot-after 8 --screenshot-path /tmp/gui.png` renders the
 window against the phone and writes a PNG of it; add `--dev-detect [--dev-read-all]`
-to exercise block detection (and reading every block) unattended.
+to start in block mode (and read every block) unattended.
 
 Run against a phone (USB debugging authorized, Android 12+):
 ```
@@ -123,8 +123,11 @@ exe-adjacent `models/<name>/`, then `~/.cache/pc4l/models/<name>/`), and
 `local/mod.rs` holds the one process-wide `ort` environment (`ort` refuses a second)
 and wraps GLM-OCR as a `Transcriber` that prepares on a thread. In `app.rs` the crop
 is a rectangle plus an optional quad (`Selection`); any hand edit of the crop drops
-the quad (`set_rect`), blocks are keyed to the captured frame + rotation, and "read
-all" is a queue drained one read at a time. `ort` is pinned to a git commit because the published rc.13 has a different
+the quad (`set_rect`) except dragging a quad corner, which moves that corner and
+refits the rectangle. Block mode (`block_mode`) re-runs the detector whenever the
+shown frame is new (throttled to `LIVE_DETECT_INTERVAL` live, paused while a read
+holds the GPU), so blocks follow zoom and aim; "read all" captures first, waits for
+the capture's own detection, then drains a snapshot queue one read at a time. `ort` is pinned to a git commit because the published rc.13 has a different
 API; its `download-binaries` fetches pyke's prebuilt ONNX Runtime at build time, and
 the WebGPU provider is a separate `libwebgpu_dawn.so` that lands next to the binary
 (as a symlink into `~/.cache/dfbin` -- copy the real file into a release tarball),

@@ -7,9 +7,11 @@
 //! [`Rotation`]. The crop is kept in view coordinates and mapped back to the source
 //! frame only to fetch pixels ([`Crop::to_source`]).
 //!
-//! A block detector, when there is one, turns a captured page into a list of blocks
-//! in reading order; picking one makes it the crop, and a block that is not a
-//! rectangle (a curved or tilted page) is rectified before it is shown or read.
+//! A block detector, when there is one, runs over the page while block mode is on --
+//! at a few Hz on the live preview, once on a capture -- and lists its blocks in
+//! reading order; picking one makes it the crop, and a block that is not a
+//! rectangle (a curved or tilted page) is rectified before it is shown or read. The
+//! crop's corners can be dragged, so a block is a starting point, not a verdict.
 
 use crate::layout::{self, Block, BlockDetector, Quad};
 use crate::stream::{Shared, Status, Worker};
@@ -32,8 +34,14 @@ use std::time::{Duration, Instant};
 const PREVIEW_MAX_EDGE: usize = 1920;
 /// Longest edge handed to the block detector (its own input is 800 px square).
 const DETECT_MAX_EDGE: usize = 1600;
+/// How often, at most, the detector runs on the live preview.
+const LIVE_DETECT_INTERVAL: Duration = Duration::from_millis(200);
+/// How close (screen px) to a corner a drag must start to take the corner.
+const HANDLE_PX: f32 = 10.0;
 /// Drags smaller than this are a click, which clears the crop.
 const MIN_CROP_PX: usize = 8;
+const SELECTED_COLOUR: Color32 = Color32::from_rgb(255, 196, 0);
+const BLOCK_COLOUR: Color32 = Color32::from_rgb(255, 90, 40);
 
 /// A rectangle in pixels, in whichever space the context says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -155,6 +163,9 @@ enum Drag {
         last: (usize, usize),
         box_at_start: Crop,
     },
+    /// Dragging one corner of the selection (index into its quad, clockwise from
+    /// the top-left).
+    Corner(usize),
 }
 
 /// Fetches a view-space region of `frame` as rotated RGBA, every `step`-th pixel.
@@ -320,14 +331,19 @@ pub struct App {
     blocks_key: Option<(Arc<YuvFrame>, Rotation)>,
     /// Which block the crop is, for tab to move on from.
     selected_block: Option<usize>,
+    /// Block mode: the detector runs on whatever is shown and its blocks are drawn.
+    block_mode: bool,
     pending_detect: Option<(Receiver<anyhow::Result<Vec<Block>>>, Instant)>,
-    /// Blocks still to read, for "read all".
-    read_queue: VecDeque<usize>,
+    last_detect: Option<Instant>,
+    /// Blocks still to read, for "read all": label and where, taken when it began
+    /// so a live re-detection cannot reshuffle them.
+    read_queue: VecDeque<(String, Selection)>,
+    /// A "read all" waiting for the capture's own blocks to arrive.
+    read_all_armed: bool,
     /// Development aid: read once, as soon as a frame is available.
     dev_read: bool,
-    /// Development aid: detect blocks once, as soon as the detector is ready, and
-    /// then (second flag) read them all.
-    dev_detect: (bool, bool),
+    /// Development aid: read every block once there are some.
+    dev_read_all: bool,
     /// Development aid: a zoom to apply live, and when the first frame was seen.
     dev_zoom: Option<(f32, Option<Instant>)>,
     /// Development aid: write a screenshot of the window to this path after the
@@ -368,10 +384,13 @@ impl App {
             blocks: Vec::new(),
             blocks_key: None,
             selected_block: None,
+            block_mode: false,
             pending_detect: None,
+            last_detect: None,
             read_queue: VecDeque::new(),
+            read_all_armed: false,
             dev_read: false,
-            dev_detect: (false, false),
+            dev_read_all: false,
             dev_zoom: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
         }
@@ -385,8 +404,10 @@ impl App {
         self.dev_read = on;
     }
 
+    /// Starts in block mode, optionally reading every block once there are some.
     pub fn set_dev_detect(&mut self, detect: bool, read_all: bool) {
-        self.dev_detect = (detect, read_all);
+        self.block_mode = detect;
+        self.dev_read_all = read_all;
     }
 
     pub fn set_rotation(&mut self, rotation: Rotation) {
@@ -468,13 +489,55 @@ impl App {
         self.read_selection(selection, ResultsScope::One(selection), None);
     }
 
-    /// Reads every detected block in reading order, one after the other.
+    /// Reads every detected block in reading order, one after the other. Reads are
+    /// of a capture, so a live view is captured first and its own detection awaited.
     fn read_all(&mut self) {
-        if self.blocks.is_empty() {
-            self.say("no blocks: detect them first [L]");
+        if !self.block_mode {
+            self.say("turn on Blocks [L] first");
             return;
         }
-        self.read_queue = (0..self.blocks.len()).collect();
+        if self.captured.is_none() {
+            self.capture();
+        }
+        self.read_all_armed = true;
+        self.start_read_all_if_ready();
+    }
+
+    /// The armed "read all" begins once the blocks are the capture's.
+    fn start_read_all_if_ready(&mut self) {
+        if !self.read_all_armed || self.pending_detect.is_some() {
+            return;
+        }
+        let Some(captured) = &self.captured else {
+            self.read_all_armed = false;
+            return;
+        };
+        if !self
+            .blocks_key
+            .as_ref()
+            .is_some_and(|(f, _)| Arc::ptr_eq(f, captured))
+        {
+            return;
+        }
+        self.read_all_armed = false;
+        if self.blocks.is_empty() {
+            self.say("no blocks found on this page");
+            return;
+        }
+        self.read_queue = self
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                (
+                    format!("#{} {}", i + 1, b.label),
+                    Selection {
+                        rect: b.rect,
+                        quad: b.quad,
+                    },
+                )
+            })
+            .collect();
         self.set_results_key(ResultsScope::AllBlocks);
         self.results.clear();
         self.next_queued_read();
@@ -485,18 +548,11 @@ impl App {
         if self.pending.is_some() {
             return;
         }
-        while let Some(i) = self.read_queue.pop_front() {
-            let Some(b) = self.blocks.get(i) else {
-                continue;
-            };
-            let selection = Some(Selection {
-                rect: b.rect,
-                quad: b.quad,
-            });
-            let label = format!("#{} {}", i + 1, b.label);
-            self.select_block(i);
-            self.read_selection(selection, ResultsScope::AllBlocks, Some(label));
-            return;
+        if let Some((label, selection)) = self.read_queue.pop_front() {
+            self.crop = Some(selection.rect);
+            self.quad = selection.quad;
+            self.selected_block = None;
+            self.read_selection(Some(selection), ResultsScope::AllBlocks, Some(label));
         }
     }
 
@@ -613,47 +669,81 @@ impl App {
                 self.pending_detect = None;
                 match result {
                     Ok(blocks) => {
-                        self.say(format!(
-                            "{} block{} in {:.2}s",
-                            blocks.len(),
-                            if blocks.len() == 1 { "" } else { "s" },
-                            elapsed.as_secs_f32()
-                        ));
+                        if self.captured.is_some() {
+                            self.say(format!(
+                                "{} block{} in {:.2}s",
+                                blocks.len(),
+                                if blocks.len() == 1 { "" } else { "s" },
+                                elapsed.as_secs_f32()
+                            ));
+                        }
                         self.blocks = blocks;
                         self.selected_block = None;
                     }
-                    Err(e) => self.say(format!("block detection failed: {e:#}")),
+                    Err(e) => {
+                        // Live mode would repeat the failure every tick.
+                        self.block_mode = false;
+                        self.say(format!("block detection failed: {e:#}"));
+                    }
                 }
+                self.start_read_all_if_ready();
             }
         }
     }
 
-    /// Runs the block detector over the captured frame (capturing first if live),
-    /// on a thread. The result lands in `blocks` in view space.
-    fn detect(&mut self) {
-        let Some(detector) = self.detector.clone() else {
+    /// Block mode: `L` or the toolbar toggle.
+    fn toggle_block_mode(&mut self) {
+        let Some(detector) = &self.detector else {
             self.say("no block detector in this build");
             return;
         };
-        if self.pending_detect.is_some() {
-            self.say("still detecting");
+        if !self.block_mode {
+            if let Some(status) = detector.status() {
+                self.say(status);
+                return;
+            }
+        }
+        self.block_mode = !self.block_mode;
+    }
+
+    /// In block mode, runs the detector over whatever is shown whenever it is not
+    /// already running, the frame is new, and (live) the interval has passed. A
+    /// read in flight gets the GPU to itself.
+    fn maybe_detect(&mut self, ctx: &egui::Context) {
+        if !self.block_mode || self.pending_detect.is_some() || self.pending.is_some() {
             return;
         }
+        let Some(detector) = self.detector.clone() else {
+            return;
+        };
         if !detector.ready() {
-            self.say(
-                detector
-                    .status()
-                    .unwrap_or_else(|| "block detector not ready".into()),
-            );
+            return;
+        }
+        let Some(frame) = self.current_frame() else {
+            return;
+        };
+        if self
+            .blocks_key
+            .as_ref()
+            .is_some_and(|(f, r)| Arc::ptr_eq(f, &frame) && *r == self.rotation)
+        {
             return;
         }
         if self.captured.is_none() {
-            self.capture();
+            if let Some(at) = self.last_detect {
+                let since = at.elapsed();
+                if since < LIVE_DETECT_INTERVAL {
+                    ctx.request_repaint_after(LIVE_DETECT_INTERVAL - since);
+                    return;
+                }
+            }
         }
-        let Some(frame) = self.captured.clone() else {
-            self.say("nothing to detect on yet");
-            return;
-        };
+        self.detect(detector, frame);
+    }
+
+    /// Runs the block detector over `frame`, on a thread. The result lands in
+    /// `blocks` in view space.
+    fn detect(&mut self, detector: Arc<dyn BlockDetector>, frame: Arc<YuvFrame>) {
         let rotation = self.rotation;
         let (vw, vh) = rotation.rotated_size(frame.width, frame.height);
         let step = vw.max(vh).div_ceil(DETECT_MAX_EDGE).max(1);
@@ -691,21 +781,27 @@ impl App {
             })
             .expect("spawning detection thread");
         self.pending_detect = Some((rx, Instant::now()));
+        self.last_detect = Some(Instant::now());
     }
 
-    /// Blocks belong to the frame and rotation they were found on.
+    /// Blocks stay until the next detection replaces them, unless the view they
+    /// were found in is gone (rotation, block mode off; the caller handles a frame
+    /// size change).
     fn drop_stale_blocks(&mut self) {
-        let stale = match (&self.blocks_key, &self.captured) {
-            (Some((f, r)), Some(c)) => !Arc::ptr_eq(f, c) || *r != self.rotation,
-            (Some(_), None) => true,
-            (None, _) => false,
-        };
+        let stale = !self.block_mode
+            || self
+                .blocks_key
+                .as_ref()
+                .is_some_and(|(_, r)| *r != self.rotation);
         if stale {
-            self.blocks.clear();
-            self.blocks_key = None;
-            self.selected_block = None;
-            self.read_queue.clear();
+            self.clear_blocks();
         }
+    }
+
+    fn clear_blocks(&mut self) {
+        self.blocks.clear();
+        self.blocks_key = None;
+        self.selected_block = None;
     }
 
     /// Whether the selected backend can take a read now (a local model may still
@@ -775,15 +871,19 @@ impl App {
                 }
             });
             if let Some(detector) = &self.detector {
-                let ready = detector.ready() && self.pending_detect.is_none();
-                let button = ui.add_enabled(ready, egui::Button::new("Blocks  [L]"));
-                let button = match detector.status() {
-                    Some(status) => button.on_disabled_hover_text(status),
-                    None => button
-                        .on_hover_text("find the page's blocks; click one or tab through them"),
+                let status = detector.status();
+                let toggle = ui.add_enabled(
+                    status.is_none(),
+                    egui::Button::selectable(self.block_mode, "Blocks  [L]"),
+                );
+                let toggle = match status {
+                    Some(status) => toggle.on_disabled_hover_text(status),
+                    None => toggle.on_hover_text(
+                        "find the page's blocks as you aim; click one or tab through them",
+                    ),
                 };
-                if button.clicked() {
-                    self.detect();
+                if toggle.clicked() {
+                    self.toggle_block_mode();
                 }
             }
             ui.separator();
@@ -882,15 +982,15 @@ impl App {
                 ui.strong("CAPTURED");
                 ui.weak("preview frozen — space or esc goes back to live");
             }
-            if self.pending_detect.is_some() {
+            if self.block_mode {
                 ui.separator();
-                ui.spinner();
-                ui.label("detecting blocks");
-            } else if !self.blocks.is_empty() {
-                ui.separator();
+                if self.captured.is_none() && self.pending_detect.is_some() {
+                    ui.spinner();
+                }
                 ui.label(format!(
-                    "{} blocks — click one, tab through them, ctrl+enter reads all",
-                    self.blocks.len()
+                    "{} block{} — click one, tab through them, ctrl+enter reads all",
+                    self.blocks.len(),
+                    if self.blocks.len() == 1 { "" } else { "s" }
                 ));
             } else if let Some(status) = self.detector.as_ref().and_then(|d| d.status()) {
                 ui.separator();
@@ -931,6 +1031,8 @@ impl App {
         // The image is centred inside the response rect; map pointer positions
         // against where the pixels actually are.
         let image_rect = Rect::from_center_size(response.rect.center(), size);
+        let to_screen =
+            |x: f32, y: f32| Pos2::new(image_rect.min.x + x * scale, image_rect.min.y + y * scale);
         let to_view = |p: Pos2| -> (usize, usize) {
             let x = ((p.x - image_rect.min.x) / scale)
                 .round()
@@ -941,11 +1043,21 @@ impl App {
             (x, y)
         };
 
+        // The selection's corners on screen, for the handles.
+        let corners: Option<[Pos2; 4]> = self.selection().map(|sel| {
+            sel.quad
+                .unwrap_or_else(|| layout::rect_quad(sel.rect))
+                .map(|[x, y]| to_screen(x, y))
+        });
         if response.drag_started() {
-            if let Some(start) = response.interact_pointer_pos().map(to_view) {
-                // Inside the box: pan it. Outside: draw a new one.
-                self.drag = Some(match self.crop {
-                    Some(c) if c.contains(start.0, start.1) => Drag::Move {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let start = to_view(pos);
+                let handle =
+                    corners.and_then(|c| (0..4).find(|&i| c[i].distance(pos) <= HANDLE_PX));
+                // On a corner: drag it. Inside the box: pan it. Outside: draw a new one.
+                self.drag = Some(match (handle, self.crop) {
+                    (Some(i), _) => Drag::Corner(i),
+                    (None, Some(c)) if c.contains(start.0, start.1) => Drag::Move {
                         last: start,
                         box_at_start: c,
                     },
@@ -974,6 +1086,7 @@ impl App {
                             (here.0 as i64 - last.0 as i64, here.1 as i64 - last.1 as i64);
                         self.set_rect(Some(box_at_start.moved(dx, dy, vw, vh)));
                     }
+                    Drag::Corner(i) => self.drag_corner(i, here, vw, vh),
                 }
             }
         }
@@ -990,25 +1103,29 @@ impl App {
             }
         }
 
-        let to_screen =
-            |x: f32, y: f32| Pos2::new(image_rect.min.x + x * scale, image_rect.min.y + y * scale);
         let painter = ui.painter_at(image_rect);
-        // Detected blocks: their quads, numbered in reading order.
+        // Detected blocks: their quads, numbered in reading order. Each line sits on
+        // a dark underlay so it reads on white paper and on ink alike.
         for (i, b) in self.blocks.iter().enumerate() {
             let selected = self.selected_block == Some(i);
             let quad = b.quad.unwrap_or_else(|| layout::rect_quad(b.rect));
             let points: Vec<Pos2> = quad.iter().map(|[x, y]| to_screen(*x, *y)).collect();
             let colour = if selected {
-                Color32::from_rgb(255, 196, 0)
+                SELECTED_COLOUR
             } else {
-                Color32::from_rgb(80, 220, 120)
+                BLOCK_COLOUR
             };
+            let width = if selected { 2.5 } else { 2.0 };
             painter.add(Shape::closed_line(
                 points.clone(),
-                Stroke::new(if selected { 2.5 } else { 1.5 }, colour),
+                Stroke::new(width + 2.0, Color32::from_black_alpha(200)),
+            ));
+            painter.add(Shape::closed_line(
+                points.clone(),
+                Stroke::new(width, colour),
             ));
             let tag = format!("{}", i + 1);
-            let font = FontId::proportional(13.0);
+            let font = FontId::proportional(14.0);
             let galley = painter.layout_no_wrap(tag, font, Color32::BLACK);
             let at = points[0];
             let bg = Rect::from_min_size(at, galley.size() + Vec2::splat(4.0));
@@ -1040,9 +1157,59 @@ impl App {
             painter.rect_stroke(
                 rect,
                 0.0,
-                Stroke::new(2.0, Color32::from_rgb(255, 196, 0)),
+                Stroke::new(2.0, SELECTED_COLOUR),
                 StrokeKind::Outside,
             );
+            // The quad, when the selection is one, and the corner handles.
+            if let Some(corners) = corners {
+                if self.quad.is_some() {
+                    painter.add(Shape::closed_line(
+                        corners.to_vec(),
+                        Stroke::new(2.0, SELECTED_COLOUR),
+                    ));
+                }
+                for c in corners {
+                    painter.circle(c, 5.0, SELECTED_COLOUR, Stroke::new(1.5, Color32::BLACK));
+                }
+            }
+        }
+    }
+
+    /// Moves corner `i` of the selection to `here`. A rectangle stays a rectangle
+    /// (the opposite corner is fixed); a quad's corner moves on its own and the
+    /// rectangle around it follows.
+    fn drag_corner(&mut self, i: usize, here: (usize, usize), vw: usize, vh: usize) {
+        let Some(sel) = self.selection() else {
+            return;
+        };
+        match sel.quad {
+            None => {
+                let q = layout::rect_quad(sel.rect);
+                let opposite = q[(i + 2) % 4];
+                let opposite = (opposite[0] as usize, opposite[1] as usize);
+                if let Some(rect) = Crop::from_corners(opposite, here).clamped(vw, vh) {
+                    self.set_rect(Some(rect));
+                }
+            }
+            Some(mut q) => {
+                q[i] = [here.0 as f32, here.1 as f32];
+                let (x0, x1) = q.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                    (lo.min(p[0]), hi.max(p[0]))
+                });
+                let (y0, y1) = q.iter().fold((f32::MAX, f32::MIN), |(lo, hi), p| {
+                    (lo.min(p[1]), hi.max(p[1]))
+                });
+                let rect = Crop {
+                    x: x0.floor() as usize,
+                    y: y0.floor() as usize,
+                    w: (x1.ceil() - x0.floor()) as usize,
+                    h: (y1.ceil() - y0.floor()) as usize,
+                };
+                if let Some(rect) = rect.clamped(vw, vh) {
+                    self.crop = Some(rect);
+                    self.quad = Some(q);
+                }
+            }
         }
     }
 
@@ -1084,9 +1251,9 @@ impl App {
                 );
                 if self.detector.is_some() {
                     ui.label(
-                        "Blocks [L] finds the page's text blocks in reading order: click \
-                         one or tab through them to make it the box; ctrl+enter reads \
-                         them all.",
+                        "Blocks [L] keeps finding the page's blocks in reading order as \
+                         you aim: click one or tab through them to make it the box, drag \
+                         its corners to adjust it; ctrl+enter reads them all.",
                     );
                 }
             });
@@ -1256,7 +1423,7 @@ impl App {
             )
         });
         if detect {
-            self.detect();
+            self.toggle_block_mode();
         }
         if tab != 0 {
             self.step_block(tab);
@@ -1381,6 +1548,7 @@ impl eframe::App for App {
         self.handle_screenshot(ui.ctx());
         self.drop_stale_blocks();
         self.poll_read();
+        self.maybe_detect(ui.ctx());
         if self.pending.is_some() || self.pending_detect.is_some() {
             // Keep the elapsed counter moving even when no frames arrive.
             ui.ctx().request_repaint_after(Duration::from_millis(250));
@@ -1403,6 +1571,7 @@ impl eframe::App for App {
         if self.crop_space != Some(view) {
             if self.crop_space.is_some() {
                 self.set_rect(None);
+                self.clear_blocks();
             }
             self.crop_space = Some(view);
         }
@@ -1428,12 +1597,8 @@ impl eframe::App for App {
             self.dev_read = false;
             self.read();
         }
-        if self.dev_detect.0 && self.detector.as_ref().is_some_and(|d| d.ready()) {
-            self.dev_detect.0 = false;
-            self.detect();
-        }
-        if self.dev_detect.1 && !self.blocks.is_empty() && self.backend_ready() {
-            self.dev_detect.1 = false;
+        if self.dev_read_all && !self.blocks.is_empty() && self.backend_ready() {
+            self.dev_read_all = false;
             self.read_all();
         }
 

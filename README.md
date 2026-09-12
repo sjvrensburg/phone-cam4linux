@@ -150,16 +150,18 @@ live in `~/.config/pc4l/gui.toml` (written with defaults on first run):
   `temperature` and shows the spread.
 - `kind = "hint-api"` -- halo-workbench's `/hint/read`.
 
-**Blocks** (`L`) runs the built-in layout model,
-[PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3), over the
-captured page: every text block, formula, figure and so on, numbered in the reading
-order the model predicts, drawn on the preview. Click a block or `tab`/`shift+tab`
-through them to make it the region; **Read all blocks** (`ctrl+enter`) reads them one
-after the other and lists the readings in page order. The model predicts multi-point
-boxes, so on a curved or tilted page a block is a quadrilateral, not a rectangle; such a
-block is perspective-rectified before it is shown and read. About 0.1 s on the GPU,
-0.3 s on the CPU. `[layout]` in `gui.toml` turns it off, picks the device, and sets the
-score threshold (0.4: handwriting scores lower than the printed pages it was trained on).
+**Blocks** (`L`, a toggle) keeps the built-in layout model,
+[PP-DocLayoutV3](https://huggingface.co/PaddlePaddle/PP-DocLayoutV3), running over
+the page as you aim (a few times a second live, once on a capture): every text block,
+formula, figure and so on, numbered in the reading order the model predicts, drawn on
+the preview. Click a block or `tab`/`shift+tab` through them to make it the region,
+then drag its corners if the model's box is not quite what you want; **Read all
+blocks** (`ctrl+enter`) reads them one after the other and lists the readings in page
+order. The model predicts multi-point boxes, so on a curved or tilted page a block is a
+quadrilateral, not a rectangle; such a block is perspective-rectified before it is
+shown and read. About 0.1 s on the GPU, 0.3 s on the CPU. `[layout]` in `gui.toml`
+turns it off, picks the device, and sets the score threshold (0.4: handwriting scores
+lower than the printed pages it was trained on).
 
 The built-in models' files (~658 MB for GLM-OCR, 130 MB for the layout model) are not
 inside the binary. Each is looked for in `$PC4L_MODEL_DIR/<name>/`, then
@@ -169,12 +171,13 @@ none has it, it is downloaded there on first run from a pinned Hugging Face revi
 each file verified against a sha256 compiled into the app, with progress shown in the
 window. Reads and detection are refused until the model is ready.
 
-Keys: `space` capture/retake, `enter` read, `L` detect blocks, `tab`/`shift+tab`
+Keys: `space` capture/retake, `enter` read, `L` block mode on/off, `tab`/`shift+tab`
 next/previous block, `ctrl+enter` read all blocks, `esc` clear the region (then
 retake), `R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`).
 Phone zoom: the slider, the wheel over the preview, `+`/`-`, `0` to reset. The
-region: drag inside it to move it, arrow keys to nudge (`shift` for one pixel),
-`[`/`]` or the wheel over the zoomed view to shrink/grow it. `--resolution` defaults to
+region: drag inside it to move it, drag a corner handle to reshape it, arrow keys to
+nudge (`shift` for one pixel), `[`/`]` or the wheel over the zoomed view to shrink/grow
+it. `--resolution` defaults to
 `max`; `--facing`, `--connect`, `--serial`, `--bitrate`, `--fps` and `--decoder`
 are as for `pc4l`. It reconnects with backoff like the CLI.
 
