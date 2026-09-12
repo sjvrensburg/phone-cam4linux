@@ -56,6 +56,11 @@ struct Args {
     #[arg(long, value_name = "/dev/videoN")]
     device: Option<PathBuf>,
 
+    /// Camera zoom ratio at startup (the phone's own zoom; a slider in the window
+    /// changes it later).
+    #[arg(long)]
+    zoom: Option<f32>,
+
     /// Turn the picture clockwise by this many degrees at startup (a phone on a
     /// stand is usually mounted sideways). Also changeable in the window.
     #[arg(long, value_parser = ["0", "90", "180", "270"], default_value = "0")]
@@ -151,6 +156,8 @@ fn main() -> Result<()> {
             max_fps: args.fps,
             bitrate_bps: Some(args.bitrate.saturating_mul(1_000_000)),
             decoder,
+            zoom: args.zoom.filter(|&z| z > 1.0),
+            torch: false,
         },
         resolution,
         tee_device: args.device,

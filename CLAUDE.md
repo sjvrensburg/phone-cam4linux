@@ -68,9 +68,12 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
    `Error::StreamStalled`). The server's stdout/stderr is relayed into `log`.
    **`cameras.rs`** parses the server's `list_camera_sizes=true` report.
 3. **`protocol.rs`** — parses scrcpy's **undocumented** video-socket wire format
-   (12-byte codec-meta header, then per-frame 12-byte header + Annex-B payload).
-   Reverse-engineered against the pinned server version; unit-tested against
-   hand-built fixtures.
+   (4-byte codec id, then 12-byte packet headers: a *session meta* packet carrying
+   width/height before each encoder session, else pts/flags + size + Annex-B payload;
+   flag bits 63/62/61 = session/config/keyframe). Reverse-engineered against the pinned
+   server version (4.1; 3.x had a 12-byte codec header and no session packets) and
+   unit-tested against hand-built fixtures. A mid-stream session meta at a new size ends
+   the session with `Error::StreamResized` so the reconnect loop reopens the sink.
 4. **`decode.rs`** — Annex-B → I420 via `openh264` (statically linked via `source`
    feature) or, with the `ffmpeg` feature, system libavcodec (`Backend::Ffmpeg`).
 5. **`convert.rs`** — I420 → packed YUYV422 (V4L2) and → RGBA8 (whole, cropped region, or
@@ -118,6 +121,9 @@ These are load-bearing and were each the cause of a real failure during bring-up
 - **`send_dummy_byte=true` + read that byte before the codec header.** With `adb forward`,
   the local TCP connect succeeds *before* the device-side socket exists, so an early
   read gets EOF. `connect_with_retry` reconnects until the dummy byte arrives.
+- **`send_stream_meta=true`** is the 4.x name of what 3.x called `send_codec_meta`;
+  the server only warns about unknown options, so a stale name silently changes the
+  stream layout.
 - **`scid` must fit in a signed 32-bit int.** scrcpy parses it with `Integer.parseInt(v, 16)`,
   so the top bit must be 0 (first hex digit ≤ 7). `random_scid_hex8` masks with `0x7fffffff`.
 
@@ -136,6 +142,15 @@ filters these.
 libavcodec gotchas in the ffmpeg backend: `avcodec_receive_frame` unrefs its destination
 before returning EAGAIN (so drain into a scratch frame and swap), and an SPS/PPS-only
 packet is "invalid data" (so it is prepended to the next packet, as scrcpy does).
+
+## Camera controls
+
+scrcpy 4.x exposes exactly two: zoom (`camera_zoom=` at start, Camera2
+`CONTROL_ZOOM_RATIO`, Android 11+; the range comes from `--list-sizes` /
+`CameraInfo::zoom_range`) and torch (`camera_torch=`). Both are also live control-socket
+messages (TYPE_CAMERA_ZOOM_IN/OUT = 19/20, step ×1.0625; TYPE_CAMERA_SET_TORCH = 18)
+once `control=true` and a second connection to the forwarded port are in place. No
+exposure, focus or white-balance control exists at any version.
 
 ## Scope
 

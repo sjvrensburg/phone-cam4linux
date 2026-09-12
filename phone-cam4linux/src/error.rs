@@ -17,6 +17,9 @@ pub enum Error {
     #[error("video stream stalled: no data from the phone for {0:?}")]
     StreamStalled(std::time::Duration),
 
+    #[error("the phone restarted the video stream at {width}x{height}; reconnect to pick up the new size")]
+    StreamResized { width: u32, height: u32 },
+
     #[error("H.264 decode error: {0}")]
     Decode(String),
 

@@ -6,14 +6,16 @@
 //!
 //! ```text
 //! [server] INFO: List of cameras:
-//!     --camera-id=0    (back, 5760x4312, fps=[15, 20, 24, 30])
+//!     --camera-id=0    (back, 5760x4312, fps={15, 20, 24, 30}, zoom-range=[1, 8])
 //!         - 4000x3000
 //!         - 3840x2160
 //!       High speed capture (--camera-high-speed):
-//!         - 1280x720 (fps=[120])
-//!     --camera-id=1    (front, 4608x3456, fps=[15, 20, 24, 30])
+//!         - 1280x720 (fps={120})
+//!     --camera-id=1    (front, 4608x3456, fps={15, 20, 24, 30}, zoom-range=[1, 1])
 //!         ...
 //! ```
+//!
+//! (scrcpy 3.x printed `fps=[...]` and no zoom range; both spellings parse.)
 //!
 //! High-speed sizes are ignored: this crate never enables `camera_high_speed`.
 
@@ -22,7 +24,7 @@ use crate::decode::Backend;
 use crate::error::{Error, Result};
 use crate::session::Facing;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CameraInfo {
     /// Camera2 id, as accepted by scrcpy's `camera_id=`.
     pub id: String,
@@ -30,6 +32,9 @@ pub struct CameraInfo {
     /// The sensor's full resolution as reported by scrcpy.
     pub sensor_size: Option<(u32, u32)>,
     pub fps: Vec<u32>,
+    /// `(min, max)` of Camera2's `CONTROL_ZOOM_RATIO_RANGE`, as reported by scrcpy
+    /// 4.x on Android 11+. `None` when not reported; `(1, 1)` means no zoom.
+    pub zoom_range: Option<(f32, f32)>,
     /// Supported capture sizes for normal (non-high-speed) capture, in the order the
     /// device reports them (largest first on every device seen so far).
     pub sizes: Vec<(u32, u32)>,
@@ -120,7 +125,8 @@ pub fn parse_camera_listing(output: &str) -> Vec<CameraInfo> {
     cameras
 }
 
-/// Parses `0    (back, 5760x4312, fps=[15, 20, 24, 30])` (the part after `--camera-id=`).
+/// Parses `0    (back, 5760x4312, fps={15, 20, 24, 30}, zoom-range=[1, 8])` (the
+/// part after `--camera-id=`).
 fn parse_camera_header(rest: &str) -> CameraInfo {
     let (id, detail) = match rest.split_once('(') {
         Some((id, detail)) => (id.trim(), detail.trim_end_matches(')')),
@@ -131,29 +137,56 @@ fn parse_camera_header(rest: &str) -> CameraInfo {
         facing: None,
         sensor_size: None,
         fps: Vec::new(),
+        zoom_range: None,
         sizes: Vec::new(),
     };
-    // The fps list contains commas itself, so split it off first.
-    let (fields, fps) = match detail.split_once("fps=[") {
-        Some((fields, fps)) => (fields, fps.trim_end_matches(']')),
-        None => (detail, ""),
-    };
-    for field in fields.split(',').map(str::trim) {
-        match field {
-            "back" => info.facing = Some(Facing::Back),
-            "front" => info.facing = Some(Facing::Front),
-            _ => {
-                if let Some(size) = parse_size(field) {
-                    info.sensor_size = Some(size);
+    for field in split_fields(detail) {
+        match field.split_once('=') {
+            None => match field {
+                "back" => info.facing = Some(Facing::Back),
+                "front" => info.facing = Some(Facing::Front),
+                _ => {
+                    if let Some(size) = parse_size(field) {
+                        info.sensor_size = Some(size);
+                    }
+                }
+            },
+            Some(("fps", list)) => {
+                info.fps = list_items(list).filter_map(|f| f.parse().ok()).collect();
+            }
+            Some(("zoom-range", list)) => {
+                let mut items = list_items(list).filter_map(|f| f.parse::<f32>().ok());
+                if let (Some(lo), Some(hi)) = (items.next(), items.next()) {
+                    info.zoom_range = Some((lo, hi));
                 }
             }
+            Some(_) => {}
         }
     }
-    info.fps = fps
-        .split(',')
-        .filter_map(|f| f.trim().parse().ok())
-        .collect();
     info
+}
+
+/// Splits on the commas between fields, not the ones inside a `[...]`/`{...}` list.
+fn split_fields(detail: &str) -> impl Iterator<Item = &str> {
+    let mut depth = 0i32;
+    detail
+        .split(move |c: char| {
+            match c {
+                '[' | '{' => depth += 1,
+                ']' | '}' => depth -= 1,
+                _ => {}
+            }
+            c == ',' && depth == 0
+        })
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+}
+
+/// The items of `[a, b]` or `{a, b}`.
+fn list_items(list: &str) -> impl Iterator<Item = &str> {
+    list.trim_matches(|c| matches!(c, '[' | ']' | '{' | '}'))
+        .split(',')
+        .map(str::trim)
 }
 
 /// Parses a leading `WxH`, ignoring anything after it.
@@ -170,12 +203,12 @@ mod tests {
     const FIXTURE: &str = "\
 [server] INFO: Device: [samsung] samsung SM-A307FN (Android 13)
 [server] INFO: List of cameras:
-    --camera-id=0    (back, 5760x4312, fps=[15, 20, 24, 30])
+    --camera-id=0    (back, 5760x4312, fps={15, 20, 24, 30}, zoom-range=[1, 8])
         - 4000x3000
         - 3840x2160
         - 1920x1080
       High speed capture (--camera-high-speed):
-        - 1280x720 (fps=[120])
+        - 1280x720 (fps={120})
     --camera-id=1    (front, 4608x3456, fps=[15, 20, 24, 30])
         - 4608x3456
         - 1280x720
@@ -191,12 +224,16 @@ mod tests {
         assert_eq!(back.facing, Some(Facing::Back));
         assert_eq!(back.sensor_size, Some((5760, 4312)));
         assert_eq!(back.fps, vec![15, 20, 24, 30]);
+        assert_eq!(back.zoom_range, Some((1.0, 8.0)));
         // The high-speed 1280x720 must not leak into the normal list.
         assert_eq!(back.sizes, vec![(4000, 3000), (3840, 2160), (1920, 1080)]);
 
+        // The front line is in scrcpy 3.x's spelling (fps=[...], no zoom range).
         let front = &cams[1];
         assert_eq!(front.id, "1");
         assert_eq!(front.facing, Some(Facing::Front));
+        assert_eq!(front.fps, vec![15, 20, 24, 30]);
+        assert_eq!(front.zoom_range, None);
         assert_eq!(front.sizes, vec![(4608, 3456), (1280, 720)]);
     }
 

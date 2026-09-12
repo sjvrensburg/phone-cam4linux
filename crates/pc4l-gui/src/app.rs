@@ -174,6 +174,8 @@ pub struct App {
     results: Vec<Result<Transcription, String>>,
     /// What `results` were read from; they are dropped when it changes.
     results_key: Option<(Arc<YuvFrame>, Option<Crop>)>,
+    /// Slider value being dragged, not yet applied.
+    zoom_pending: Option<f32>,
     /// Development aid: read once, as soon as a frame is available.
     dev_read: bool,
     /// Development aid: write a screenshot of the window to this path after the
@@ -206,6 +208,7 @@ impl App {
             pending: None,
             results: Vec::new(),
             results_key: None,
+            zoom_pending: None,
             dev_read: false,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
         }
@@ -409,7 +412,38 @@ impl App {
             if ui.button("Reconnect").clicked() {
                 self.shared().restart();
             }
+            self.zoom_control(ui);
         });
+    }
+
+    /// Optical zoom, when the phone reports a range for this camera. Applied when
+    /// the slider is released (it takes a reconnect).
+    fn zoom_control(&mut self, ui: &mut egui::Ui) {
+        let Some((lo, hi)) = self.shared().camera().and_then(|c| c.zoom_range) else {
+            return;
+        };
+        if hi <= lo {
+            return;
+        }
+        ui.separator();
+        ui.label("Zoom:");
+        let current = self.shared().zoom();
+        let mut value = self.zoom_pending.unwrap_or(current);
+        let slider = ui.add(
+            egui::Slider::new(&mut value, lo.max(1.0)..=hi)
+                .step_by(0.1)
+                .suffix("x")
+                .fixed_decimals(1),
+        );
+        if slider.changed() {
+            self.zoom_pending = Some(value);
+        }
+        let release = slider.drag_stopped() || (slider.changed() && !slider.dragged());
+        if release {
+            if let Some(v) = self.zoom_pending.take() {
+                self.shared().set_zoom(v);
+            }
+        }
     }
 
     fn status_bar(&mut self, ui: &mut egui::Ui) {

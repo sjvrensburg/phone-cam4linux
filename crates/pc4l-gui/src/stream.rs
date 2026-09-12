@@ -3,10 +3,10 @@
 //! policy as the `pc4l` CLI). Optionally tees every frame to a V4L2 device too.
 
 use anyhow::{Context, Result};
-use phone_cam4linux::cameras::largest_usable_size;
+use phone_cam4linux::cameras::is_usable_size;
 use phone_cam4linux::decode::YuvFrame;
 use phone_cam4linux::sink::{FrameSink, V4l2Sink};
-use phone_cam4linux::{adb::AdbDevice, CameraSession, ConnectOptions, Facing};
+use phone_cam4linux::{adb::AdbDevice, CameraInfo, CameraSession, ConnectOptions, Facing};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -53,6 +53,9 @@ pub struct Shared {
     latest: Mutex<Option<Arc<YuvFrame>>>,
     status: Mutex<Status>,
     config: Mutex<StreamConfig>,
+    /// The phone's camera listing, fetched once per worker (it costs a server
+    /// round-trip) and reused for `max` resolution and the zoom range.
+    cameras: Mutex<Vec<CameraInfo>>,
 }
 
 impl Shared {
@@ -72,6 +75,32 @@ impl Shared {
 
     pub fn facing(&self) -> Facing {
         self.config.lock().unwrap().options.facing
+    }
+
+    /// What the phone reported about the current camera, once known.
+    pub fn camera(&self) -> Option<CameraInfo> {
+        let facing = self.facing();
+        self.cameras
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|c| c.facing == Some(facing))
+            .cloned()
+    }
+
+    pub fn zoom(&self) -> f32 {
+        self.config.lock().unwrap().options.zoom.unwrap_or(1.0)
+    }
+
+    /// Sets the camera zoom ratio: takes effect through a reconnect.
+    pub fn set_zoom(&self, zoom: f32) {
+        let mut cfg = self.config.lock().unwrap();
+        let value = (zoom > 1.0).then_some(zoom);
+        if cfg.options.zoom != value {
+            cfg.options.zoom = value;
+            drop(cfg);
+            self.restart();
+        }
     }
 
     /// Switches camera: takes effect through a reconnect.
@@ -110,6 +139,7 @@ impl Worker {
             latest: Mutex::new(None),
             status: Mutex::new(Status::Connecting),
             config: Mutex::new(config),
+            cameras: Mutex::new(Vec::new()),
         });
         let thread_shared = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
@@ -195,15 +225,31 @@ fn run_session(
     // The session's own stop flag: raised by the outer stop or by a restart request,
     // both of which end `run()` at the next packet.
     let session_stop = AtomicBool::new(false);
+    // List the cameras once: it answers both "what is max" and "what zoom is there".
+    if shared.cameras.lock().unwrap().is_empty() {
+        let device = select_device(&config.options)?;
+        let cameras = phone_cam4linux::list_cameras(&device).context("listing cameras")?;
+        *shared.cameras.lock().unwrap() = cameras;
+    }
     let resolution = match config.resolution {
         Resolution::PhoneDefault => None,
         Resolution::Fixed(w, h) => Some((w, h)),
         Resolution::Max => {
-            let device = select_device(&config.options)?;
-            Some(
-                largest_usable_size(&device, config.options.facing, config.options.decoder)
-                    .context("resolving the maximum resolution")?,
-            )
+            let decoder = config.options.decoder;
+            let size = shared
+                .camera()
+                .ok_or_else(|| {
+                    anyhow::anyhow!("phone reports no {:?}-facing camera", config.options.facing)
+                })?
+                .largest_size(|w, h| is_usable_size(w, h, decoder))
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "camera offers no size the {} decoder can handle",
+                        decoder.name()
+                    )
+                })?;
+            log::info!("maximum resolution resolved to {}x{}", size.0, size.1);
+            Some(size)
         }
     };
     let options = ConnectOptions {

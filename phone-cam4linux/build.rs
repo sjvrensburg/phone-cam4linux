@@ -12,10 +12,11 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 /// Pinned scrcpy release. Bump this (and SERVER_SHA256) together when updating.
-const SCRCPY_VERSION: &str = "3.1";
-/// SHA-256 of `scrcpy-server-v3.1` from
-/// https://github.com/Genymobile/scrcpy/releases/download/v3.1/scrcpy-server-v3.1
-const SERVER_SHA256: &str = "958f0944a62f23b1f33a16e9eb14844c1a04b882ca175a738c16d23cb22b86c0";
+const SCRCPY_VERSION: &str = "4.1";
+/// SHA-256 of `scrcpy-server-v4.1` from
+/// https://github.com/Genymobile/scrcpy/releases/download/v4.1/scrcpy-server-v4.1
+/// (matches the release's SHA256SUMS.txt).
+const SERVER_SHA256: &str = "deacb991ed2509715160ffdc7907e47b4160eb30d1566217e9047fd5b8850cae";
 
 fn server_url() -> String {
     format!(

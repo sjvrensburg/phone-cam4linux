@@ -47,6 +47,11 @@ pub struct ConnectOptions {
     pub bitrate_bps: Option<u32>,
     /// Which H.264 decoder to use; see [`decode::Backend`].
     pub decoder: decode::Backend,
+    /// Camera zoom ratio (Camera2 `CONTROL_ZOOM_RATIO`), clamped by the phone to the
+    /// camera's range (see [`crate::CameraInfo::zoom_range`]). `None` is 1.0.
+    pub zoom: Option<f32>,
+    /// Turn the flash on as a torch while streaming.
+    pub torch: bool,
 }
 
 impl Default for ConnectOptions {
@@ -59,6 +64,8 @@ impl Default for ConnectOptions {
             max_fps: None,
             bitrate_bps: None,
             decoder: decode::Backend::default(),
+            zoom: None,
+            torch: false,
         }
     }
 }
@@ -117,7 +124,7 @@ impl CameraSession {
             // In forward mode adb accepts our TCP connection before the server socket
             // exists; the dummy byte is how we know we reached the server itself.
             "send_dummy_byte=true".to_string(),
-            "send_codec_meta=true".to_string(),
+            "send_stream_meta=true".to_string(),
             "send_frame_meta=true".to_string(),
         ];
         if let Some((w, h)) = opts.resolution {
@@ -128,6 +135,12 @@ impl CameraSession {
         }
         if let Some(bps) = opts.bitrate_bps {
             server_args.push(format!("video_bit_rate={bps}"));
+        }
+        if let Some(zoom) = opts.zoom {
+            server_args.push(format!("camera_zoom={zoom}"));
+        }
+        if opts.torch {
+            server_args.push("camera_torch=true".to_string());
         }
 
         let mut server_process = match device.start_server(&server_args) {
@@ -219,8 +232,20 @@ impl CameraSession {
             if stop.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            let packet = match protocol::read_frame_packet(&mut reader) {
-                Ok(Some(p)) => p,
+            let packet = match protocol::read_packet(&mut reader) {
+                Ok(Some(protocol::Packet::Frame(p))) => p,
+                Ok(Some(protocol::Packet::SessionMeta(meta))) => {
+                    if meta == self.meta {
+                        continue;
+                    }
+                    // The encoder restarted at another size (scrcpy's downsize-on-
+                    // error, for one). The sink was opened at the old size, so end the
+                    // session; a reconnect picks the new size up cleanly.
+                    return Err(Error::StreamResized {
+                        width: meta.width,
+                        height: meta.height,
+                    });
+                }
                 Ok(None) => {
                     log::info!("phone closed the video stream");
                     return Ok(());

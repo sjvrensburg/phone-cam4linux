@@ -61,6 +61,16 @@ struct Args {
     #[arg(long, default_value_t = 30)]
     bitrate: u32,
 
+    /// Camera zoom ratio, e.g. 2.0 (optical/sensor zoom on the phone, not a crop of
+    /// the stream). Clamped by the phone to the camera's range; see --list-sizes.
+    /// Needs Android 11+.
+    #[arg(long)]
+    zoom: Option<f32>,
+
+    /// Keep the flash on as a torch while streaming.
+    #[arg(long)]
+    torch: bool,
+
     /// Exit when the phone disconnects or the stream fails, instead of waiting for it
     /// to come back and reconnecting (the default, so the virtual camera survives a
     /// cable wiggle or a phone reboot).
@@ -174,6 +184,8 @@ fn main() -> Result<()> {
         max_fps: args.fps,
         bitrate_bps: Some(args.bitrate.saturating_mul(1_000_000)),
         decoder,
+        zoom: args.zoom,
+        torch: args.torch,
     };
 
     stream_loop(&args, opts, resolution, &stop)
@@ -335,7 +347,12 @@ fn list_sizes(device: &AdbDevice, decoder: Backend) -> Result<()> {
             None => "unknown facing",
         };
         let fps: Vec<String> = cam.fps.iter().map(u32::to_string).collect();
-        println!("camera {} ({facing}, fps: {})", cam.id, fps.join("/"));
+        let zoom = match cam.zoom_range {
+            Some((lo, hi)) if hi > lo => format!(", zoom {lo}-{hi}x"),
+            Some(_) => ", no zoom".to_string(),
+            None => String::new(),
+        };
+        println!("camera {} ({facing}, fps: {}{zoom})", cam.id, fps.join("/"));
         for &(w, h) in &cam.sizes {
             let note = if !decoder.fits(w, h) {
                 "   (exceeds decoder limit)"

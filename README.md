@@ -63,6 +63,9 @@ Options:
 - `--bitrate MBPS` -- H.264 bitrate in Mbit/s (default `30`). Higher is crisper for
   reading text/documents.
 - `--fps N` -- cap the frame rate.
+- `--zoom RATIO` -- the phone's own camera zoom (optical/sensor, not a crop of the
+  stream), e.g. `2.5`; `--list-sizes` shows each camera's range. Android 11+.
+- `--torch` -- keep the flash on while streaming.
 - `--decoder openh264|ffmpeg` -- H.264 decoder (`ffmpeg` only with the feature; it's
   then the default).
 - `--serial SERIAL` -- pick a device when more than one is attached.
@@ -89,6 +92,7 @@ frame at full resolution.
 ```
 ./target/release/pc4l-gui --rotate 270           # phone on a stand, mounted sideways
 ./target/release/pc4l-gui --device /dev/video10  # also feed the loopback device
+./target/release/pc4l-gui --zoom 2               # start at 2x; a slider changes it later
 ```
 
 **Read it** sends the box (or the whole page) to a transcription backend and lists
