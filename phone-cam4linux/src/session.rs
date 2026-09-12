@@ -10,6 +10,7 @@ use std::io::BufReader;
 use std::net::TcpStream;
 use std::path::Path;
 use std::process::Child;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,11 +52,12 @@ impl Default for ConnectOptions {
     }
 }
 
-const SERVER_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scrcpy-server.jar"));
+pub(crate) const SERVER_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/scrcpy-server.jar"));
 
 pub struct CameraSession {
     device: AdbDevice,
     server_process: Child,
+    server_log: ServerLog,
     port: u16,
     socket: BufReader<TcpStream>,
     pub meta: protocol::CodecMeta,
@@ -110,15 +112,16 @@ impl CameraSession {
                 return Err(e);
             }
         };
+        let server_log = ServerLog::attach(&mut server_process);
 
         let socket = match connect_with_retry(port, Duration::from_secs(15)) {
             Ok(s) => s,
-            Err(e) => return Err(abort(&device, &mut server_process, port, e)),
+            Err(e) => return Err(abort(&device, &mut server_process, &server_log, port, e)),
         };
         let mut socket = BufReader::new(socket);
         let meta = match protocol::read_codec_meta(&mut socket) {
             Ok(m) => m,
-            Err(e) => return Err(abort(&device, &mut server_process, port, e)),
+            Err(e) => return Err(abort(&device, &mut server_process, &server_log, port, e)),
         };
 
         log::info!(
@@ -131,6 +134,7 @@ impl CameraSession {
         Ok(Self {
             device,
             server_process,
+            server_log,
             port,
             socket,
             meta,
@@ -153,9 +157,12 @@ impl CameraSession {
         let mut consecutive_errors = 0u32;
         let mut decoded_any = false;
 
+        let mut stats = StreamStats::default();
         while let Some(packet) = protocol::read_frame_packet(&mut self.socket)? {
+            stats.packet(packet.data.len());
             match decoder.decode(&packet.data) {
                 Ok(Some(frame)) => {
+                    stats.frame();
                     decoded_any = true;
                     consecutive_errors = 0;
                     i420_to_yuyv(&frame, &mut yuyv);
@@ -171,9 +178,11 @@ impl CameraSession {
                         return Err(Error::Decode(format!(
                             "no frame decoded after {consecutive_errors} attempts \
                              at {}x{}; the phone's camera resolution may exceed what \
-                             openh264 can decode (try --resolution 3840x2160 or lower). \
-                             Last error: {e}",
-                            self.meta.width, self.meta.height
+                             openh264 can decode (try --resolution max). \
+                             Last error: {e}\nscrcpy server output:\n{}",
+                            self.meta.width,
+                            self.meta.height,
+                            self.server_log.collected()
                         )));
                     }
                     log::debug!("skipping undecodable packet ({e})");
@@ -182,6 +191,52 @@ impl CameraSession {
         }
 
         Ok(())
+    }
+}
+
+/// Periodic debug-level throughput report, so a stalled pipeline can be localised
+/// (packets arriving but nothing decoding, vs. nothing arriving at all).
+#[derive(Default)]
+struct StreamStats {
+    started: Option<std::time::Instant>,
+    packets: u64,
+    bytes: u64,
+    frames: u64,
+}
+
+impl StreamStats {
+    const INTERVAL: Duration = Duration::from_secs(5);
+
+    fn packet(&mut self, len: usize) {
+        self.packets += 1;
+        self.bytes += len as u64;
+        self.maybe_report();
+    }
+
+    fn frame(&mut self) {
+        self.frames += 1;
+    }
+
+    fn maybe_report(&mut self) {
+        let now = std::time::Instant::now();
+        let Some(started) = self.started else {
+            self.started = Some(now);
+            return;
+        };
+        let elapsed = now.duration_since(started);
+        if elapsed < Self::INTERVAL {
+            return;
+        }
+        let secs = elapsed.as_secs_f64();
+        log::debug!(
+            "stream: {} packets ({:.1} Mbit/s), {} frames decoded ({:.1} fps)",
+            self.packets,
+            self.bytes as f64 * 8.0 / 1e6 / secs,
+            self.frames,
+            self.frames as f64 / secs
+        );
+        *self = Self::default();
+        self.started = Some(now);
     }
 }
 
@@ -196,24 +251,69 @@ impl Drop for CameraSession {
 
 /// Tears down a half-established session and folds the server's own output into the
 /// error, since that's where the useful diagnostics (camera/encoder failures) end up.
-fn abort(device: &AdbDevice, server: &mut Child, port: u16, err: Error) -> Error {
+fn abort(
+    device: &AdbDevice,
+    server: &mut Child,
+    server_log: &ServerLog,
+    port: u16,
+    err: Error,
+) -> Error {
     adb::close_stdin(server);
     let _ = server.kill();
     let _ = server.wait();
     device.remove_forward(port);
 
-    let mut output = String::new();
-    if let Some(mut out) = server.stdout.take() {
-        let _ = std::io::Read::read_to_string(&mut out, &mut output);
-    }
-    if let Some(mut err_out) = server.stderr.take() {
-        let _ = std::io::Read::read_to_string(&mut err_out, &mut output);
-    }
+    let output = server_log.collected();
     let output = output.trim();
     if output.is_empty() {
         err
     } else {
         Error::Protocol(format!("{err}\nscrcpy server output:\n{output}"))
+    }
+}
+
+/// Relays the scrcpy server's stdout/stderr into our log as it happens (the server
+/// reports camera and encoder failures there, and only there), while also keeping
+/// a copy so a failed handshake can quote it.
+#[derive(Clone, Default)]
+struct ServerLog {
+    lines: Arc<Mutex<Vec<String>>>,
+}
+
+impl ServerLog {
+    fn attach(child: &mut Child) -> Self {
+        let log = Self::default();
+        for pipe in [
+            child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            let lines = Arc::clone(&log.lines);
+            std::thread::spawn(move || {
+                use std::io::BufRead;
+                for line in BufReader::new(pipe).lines().map_while(std::result::Result::ok) {
+                    let line = line.trim_end().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if line.contains("ERROR") || line.contains("Exception") {
+                        log::warn!("scrcpy server: {line}");
+                    } else {
+                        log::debug!("scrcpy server: {line}");
+                    }
+                    lines.lock().unwrap().push(line);
+                }
+            });
+        }
+        log
+    }
+
+    fn collected(&self) -> String {
+        // Give the reader threads a moment to drain what the dying server printed.
+        std::thread::sleep(Duration::from_millis(200));
+        self.lines.lock().unwrap().join("\n")
     }
 }
 

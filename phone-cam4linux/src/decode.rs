@@ -15,6 +15,19 @@ pub struct YuvFrame {
     pub v: Vec<u8>,
 }
 
+/// The largest frame the bundled openh264 build will decode, in 16x16 macroblocks.
+///
+/// openh264 hard-codes H.264 level 5.2 as its ceiling (`MaxFS` = 36864 MBs, i.e.
+/// 3840x2160 = 32400 fits, 4000x3000 = 46875 doesn't) and rejects the SPS of anything
+/// larger with `dsNoParamSets`. There is no runtime knob for this.
+pub const MAX_MACROBLOCKS: u32 = 36864;
+
+/// Whether a `width`x`height` stream is within [`MAX_MACROBLOCKS`].
+pub fn fits_decoder(width: u32, height: u32) -> bool {
+    let mbs = width.div_ceil(16) * height.div_ceil(16);
+    mbs <= MAX_MACROBLOCKS
+}
+
 pub struct Decoder {
     inner: H264Decoder,
 }
@@ -62,4 +75,17 @@ fn depad(plane: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
         out.extend_from_slice(&plane[start..start + width]);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fits_decoder;
+
+    #[test]
+    fn decoder_ceiling() {
+        assert!(fits_decoder(3840, 2160));
+        assert!(fits_decoder(1920, 1080));
+        assert!(!fits_decoder(4000, 3000));
+        assert!(!fits_decoder(4608, 3456));
+    }
 }

@@ -92,16 +92,27 @@ impl AdbDevice {
     /// `server_args` are the `key=value` options passed to the server (must include
     /// `scid=<hex8>` matching the socket name used in [`Self::forward`]).
     pub fn start_server(&self, server_args: &[String]) -> Result<Child> {
-        let cmd = format!(
-            "CLASSPATH={DEVICE_SERVER_PATH} app_process / com.genymobile.scrcpy.Server {} {}",
-            env!("SCRCPY_SERVER_VERSION"),
-            server_args.join(" ")
-        );
+        let cmd = server_command(server_args);
         let mut argv = self.args(&[]);
         argv.push("shell");
         argv.push(&cmd);
         spawn_adb(&argv)
     }
+
+    /// Runs the scrcpy server to completion (for one-shot modes such as
+    /// `list_camera_sizes=true`) and returns everything it printed.
+    pub fn run_server_once(&self, server_args: &[String]) -> Result<String> {
+        let cmd = server_command(server_args);
+        adb(&self.args(&[]), &["shell", &cmd])
+    }
+}
+
+fn server_command(server_args: &[String]) -> String {
+    format!(
+        "CLASSPATH={DEVICE_SERVER_PATH} app_process / com.genymobile.scrcpy.Server {} {}",
+        env!("SCRCPY_SERVER_VERSION"),
+        server_args.join(" ")
+    )
 }
 
 fn adb_binary() -> Result<&'static str> {

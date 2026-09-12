@@ -6,6 +6,7 @@
 //! full architecture and scope.
 
 pub mod adb;
+pub mod cameras;
 pub mod convert;
 pub mod decode;
 pub mod error;
@@ -15,4 +16,5 @@ pub mod session;
 pub mod sink;
 
 pub use error::{Error, Result};
+pub use cameras::{list_cameras, CameraInfo};
 pub use session::{CameraSession, ConnectOptions, Facing};
