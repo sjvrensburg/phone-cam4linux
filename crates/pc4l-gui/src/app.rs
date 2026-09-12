@@ -538,31 +538,31 @@ impl App {
                 self.settings_open = false;
             }
             settings::Action::Cancel => {
-                ctx.set_zoom_factor(self.config.ui.scale);
                 self.draft = None;
                 self.settings_open = false;
             }
         }
     }
 
-    /// egui's own ctrl+plus / ctrl+minus / ctrl+0 change the zoom too: keep the
-    /// config in step (and on disk) so the next start looks the same, and drop the
-    /// typeset textures, which were rendered for the old pixel density.
+    /// The scale in force is the truth, whoever set it (the Settings slider, egui's
+    /// own ctrl+plus / ctrl+minus / ctrl+0): a change is written into the config
+    /// and the draft alike and saved at once, independent of Save/Cancel, so no
+    /// later path can snap it back. The typeset textures, rendered for the old
+    /// pixel density, are dropped.
     fn track_zoom(&mut self, ctx: &egui::Context) {
         let zoom = ctx.zoom_factor();
         // Only a change of the zoom itself counts: a draft mid-drag legitimately
         // differs from it.
         let changed = self.last_zoom.is_some_and(|z| (z - zoom).abs() > 1e-3);
         if changed {
-            match &mut self.draft {
-                Some(d) => d.ui.scale = zoom,
-                None => {
-                    if (self.config.ui.scale - zoom).abs() > 1e-3 {
-                        self.config.ui.scale = zoom;
-                        if let Err(e) = self.config.save() {
-                            log::warn!("saving the window scale: {e:#}");
-                        }
-                    }
+            log::debug!("window scale now {zoom:.2}");
+            if let Some(d) = &mut self.draft {
+                d.ui.scale = zoom;
+            }
+            if (self.config.ui.scale - zoom).abs() > 1e-3 {
+                self.config.ui.scale = zoom;
+                if let Err(e) = self.config.save() {
+                    log::warn!("saving the window scale: {e:#}");
                 }
             }
             for entry in &mut self.results {
@@ -582,6 +582,15 @@ impl App {
 
     pub fn set_settings_open(&mut self, open: bool) {
         self.settings_open = open;
+    }
+
+    /// Opens the Settings window, or closes it dropping unsaved edits (the scale
+    /// is not an edit: it is already in force and saved).
+    fn toggle_settings(&mut self) {
+        self.settings_open = !self.settings_open;
+        if !self.settings_open {
+            self.draft = None;
+        }
     }
 
     /// Starts in block mode, optionally reading every block once there are some.
@@ -1123,10 +1132,10 @@ impl App {
             ui.separator();
             if ui
                 .button("Settings  [ctrl+,]")
-                .on_hover_text("window scale, backends, block detector")
+                .on_hover_text("window scale, backends, prompts, block detector")
                 .clicked()
             {
-                self.settings_open = !self.settings_open;
+                self.toggle_settings();
             }
         });
     }
@@ -1664,7 +1673,7 @@ impl App {
             self.toggle_block_mode();
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Comma)) {
-            self.settings_open = !self.settings_open;
+            self.toggle_settings();
         }
         if tab != 0 {
             self.step_block(tab);

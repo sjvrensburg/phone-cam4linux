@@ -115,8 +115,9 @@ non-rectangular block goes through before it is shown or read -- feature-indepen
 so the window builds without a detector; `settings.rs`: the Settings window editing
 a draft `Config`, applied by `App::apply_config` (backends whose entry is unchanged
 are kept, so the local model is not reloaded; the detector is rebuilt through the
-`DetectorFactory` main.rs passes in; the scale is egui's zoom factor, tracked back
-into the config when egui's own ctrl+plus/minus change it); `mathtext.rs` (feature `math`): readings
+`DetectorFactory` main.rs passes in; the scale is egui's zoom factor and the value
+in force is authoritative -- `track_zoom` writes any change into config and draft
+and saves it at once, so Save/Cancel never touch it); `mathtext.rs` (feature `math`): readings
 typeset by Typst -- `$…$`/`$$…$$`/`\(…\)`/`\[…\]` segments converted by the `mitex`
 crate and evaluated inside MiTeX's Typst scope (vendored under `assets/mitex/`, so
 `\operatorname` and friends resolve), the rest escaped as markup, rasterised by
