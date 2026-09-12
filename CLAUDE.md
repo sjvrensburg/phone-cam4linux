@@ -126,8 +126,10 @@ is a rectangle plus an optional quad (`Selection`); any hand edit of the crop dr
 the quad (`set_rect`) except dragging a quad corner, which moves that corner and
 refits the rectangle. Block mode (`block_mode`) re-runs the detector whenever the
 shown frame is new (throttled to `LIVE_DETECT_INTERVAL` live, paused while a read
-holds the GPU), so blocks follow zoom and aim; "read all" captures first, waits for
-the capture's own detection, then drains a snapshot queue one read at a time. `ort` is pinned to a git commit because the published rc.13 has a different
+holds the GPU), so blocks follow zoom and aim; a fresh detection hands the selection
+to the new block with the highest IoU (`follow_selection`, so tab keeps its place and
+an untouched crop tracks its block); "read all" captures first, waits for the
+capture's own detection, then drains a snapshot queue one read at a time. `ort` is pinned to a git commit because the published rc.13 has a different
 API; its `download-binaries` fetches pyke's prebuilt ONNX Runtime at build time, and
 the WebGPU provider is a separate `libwebgpu_dawn.so` that lands next to the binary
 (as a symlink into `~/.cache/dfbin` -- copy the real file into a release tarball),
