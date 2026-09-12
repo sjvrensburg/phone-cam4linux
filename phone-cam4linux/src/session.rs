@@ -1,4 +1,5 @@
-//! High-level API: connect to a phone over USB and stream its camera to a V4L2 device.
+//! High-level API: connect to a phone (USB or TCP/IP ADB) and stream its camera to a
+//! V4L2 device.
 
 use crate::adb::{self, AdbDevice};
 use crate::convert::i420_to_yuyv;
@@ -32,7 +33,12 @@ impl Facing {
 
 #[derive(Debug, Clone)]
 pub struct ConnectOptions {
+    /// ADB serial to use; `None` autodetects the sole attached device.
     pub serial: Option<String>,
+    /// `host[:port]` of a phone in TCP/IP ADB mode. When set, `adb connect` is issued
+    /// (again) on every `connect()`, so a reconnect loop recovers from Wi-Fi drops,
+    /// and `serial` is ignored.
+    pub tcp_address: Option<String>,
     pub facing: Facing,
     /// Requested camera capture size, e.g. `(1280, 720)`. `None` lets the phone pick.
     pub resolution: Option<(u32, u32)>,
@@ -48,6 +54,7 @@ impl Default for ConnectOptions {
     fn default() -> Self {
         Self {
             serial: None,
+            tcp_address: None,
             facing: Facing::Back,
             resolution: None,
             max_fps: None,
@@ -78,9 +85,10 @@ impl CameraSession {
     /// Pushes the embedded scrcpy-server jar, starts it in camera mode, and connects
     /// to its video socket.
     pub fn connect(opts: ConnectOptions) -> Result<Self> {
-        let device = match &opts.serial {
-            Some(s) => AdbDevice::with_serial(s.clone()),
-            None => AdbDevice::autodetect()?,
+        let device = match (&opts.tcp_address, &opts.serial) {
+            (Some(addr), _) => AdbDevice::connect_tcp(addr)?,
+            (None, Some(s)) => AdbDevice::with_serial(s.clone()),
+            (None, None) => AdbDevice::autodetect()?,
         };
 
         device.push_server_jar(SERVER_JAR)?;

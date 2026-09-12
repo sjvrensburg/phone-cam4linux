@@ -79,6 +79,24 @@ Sizes that aren't a multiple of 8 in both dimensions (e.g. 4000x2250) are listed
 phone but unusable: scrcpy rounds them for the encoder and the camera then refuses the
 rounded size. `--list-sizes` marks these; `--resolution max` skips them.
 
+### Wireless (TCP/IP ADB)
+
+Once, with the phone on USB and Wi-Fi:
+
+```
+pc4l --tcpip            # switches adbd to TCP mode, prints e.g. 192.168.1.53:5555
+```
+
+Then unplug and stream over Wi-Fi (the `adb connect` is re-issued on every reconnect,
+so a Wi-Fi hiccup is recovered like a cable wiggle):
+
+```
+pc4l --connect 192.168.1.53 --resolution 1920x1080
+```
+
+TCP mode persists until the phone reboots; `adb usb` switches back. 1080p at 30 Mbit/s
+streams fine over a decent Wi-Fi link; drop `--bitrate` if you see stalls.
+
 ### Running as a service
 
 `contrib/systemd/pc4l.service` is a systemd *user* unit that keeps the camera exposed
@@ -102,7 +120,8 @@ exercises the loopback/format-negotiation/write path independently of ADB/hardwa
 - **Protocol pinning**: `src/protocol.rs` implements scrcpy's undocumented
   video-socket wire format, reverse-engineered against the pinned server version in
   `build.rs` (`SCRCPY_VERSION`). Re-verify this module if you bump `SCRCPY_VERSION`.
-- USB ADB only for now (no Wi-Fi/TCP ADB, ratified as v1 scope).
+- Wi-Fi works via TCP/IP ADB (`--tcpip` / `--connect`); the initial switch to TCP
+  mode still needs the USB cable once per phone boot.
 - No audio, display mirroring, or input control -- camera-to-V4L2 only.
 - Decode ceiling is openh264's unless built with `--features ffmpeg`; see
   "resolution ceiling" above.

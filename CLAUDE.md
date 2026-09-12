@@ -55,7 +55,8 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
 
 1. **`adb.rs`** — shells out to the system `adb` binary (not a Rust ADB lib; see the
    module doc for why). Pushes the jar, sets up `adb forward tcp:0 localabstract:scrcpy_<scid>`,
-   and launches the server via `app_process`.
+   and launches the server via `app_process`. Also `connect_tcp` / `enable_tcpip` for
+   Wi-Fi (`adb connect` exits 0 even on failure -- the verdict is in its text).
 2. **`session.rs`** — the orchestrator and public API (`CameraSession`, `ConnectOptions`,
    `Facing`). `connect()` starts the server with a fixed set of scrcpy options and
    completes the handshake; `run(sink, stop)` is the blocking decode→convert→write loop
@@ -108,5 +109,6 @@ packet is "invalid data" (so it is prepended to the next packet, as scrcpy does)
 
 ## Scope
 
-Camera→V4L2 only (no audio, display mirroring, or input control). Cross-platform virtual-camera sinks (Windows/macOS) are explicitly out of
+Camera→V4L2 only (no audio, display mirroring, or input control). USB and TCP/IP ADB
+(`--connect`); the one-time `--tcpip` switch needs USB. Cross-platform virtual-camera sinks (Windows/macOS) are explicitly out of
 scope — V4L2 is Linux-only.

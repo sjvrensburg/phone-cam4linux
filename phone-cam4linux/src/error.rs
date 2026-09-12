@@ -8,7 +8,7 @@ pub enum Error {
     #[error("adb command failed: {0}")]
     AdbCommand(String),
 
-    #[error("no Android device found over USB (is USB debugging enabled and authorized?)")]
+    #[error("no Android device found (is USB debugging enabled and authorized, or the phone reachable over Wi-Fi?)")]
     NoDevice,
 
     #[error("unexpected scrcpy protocol data: {0}")]

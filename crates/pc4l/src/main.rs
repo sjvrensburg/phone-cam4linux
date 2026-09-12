@@ -17,6 +17,17 @@ struct Args {
     #[arg(long)]
     serial: Option<String>,
 
+    /// Use the phone over Wi-Fi: `adb connect` to HOST[:PORT] (port 5555 by default)
+    /// instead of USB. The phone must be in TCP/IP ADB mode first, see --tcpip.
+    #[arg(long, value_name = "HOST[:PORT]", conflicts_with = "serial")]
+    connect: Option<String>,
+
+    /// Switch the USB-attached phone's ADB to TCP/IP mode on this port, print the
+    /// address to pass to --connect, and exit. The cable can then be unplugged
+    /// (`adb usb` switches back).
+    #[arg(long, value_name = "PORT", num_args = 0..=1, default_missing_value = "5555")]
+    tcpip: Option<u16>,
+
     /// Which camera to use.
     #[arg(long, value_enum, default_value = "back")]
     facing: FacingArg,
@@ -105,9 +116,13 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
+    if let Some(port) = args.tcpip {
+        return enable_tcpip(args.serial.as_deref(), port);
+    }
+
     let decoder = Backend::from(args.decoder);
     if args.list_sizes {
-        return list_sizes(args.serial.as_deref(), decoder);
+        return list_sizes(&select_device(&args)?, decoder);
     }
 
     let video_nr = video_nr_from_path(&args.device)?;
@@ -127,7 +142,7 @@ fn main() -> Result<()> {
     let resolution = match args.resolution.as_deref() {
         None => None,
         Some("max") => Some(largest_decodable_size(
-            args.serial.as_deref(),
+            &select_device(&args)?,
             facing,
             decoder,
         )?),
@@ -154,7 +169,8 @@ fn main() -> Result<()> {
     };
 
     let opts = ConnectOptions {
-        serial: args.serial,
+        serial: args.serial.clone(),
+        tcp_address: args.connect.clone(),
         facing,
         resolution,
         max_fps: args.fps,
@@ -252,16 +268,31 @@ fn video_nr_from_path(path: &std::path::Path) -> Result<u32> {
         .with_context(|| format!("--device {:?} must look like /dev/videoN", path))
 }
 
-fn select_device(serial: Option<&str>) -> Result<AdbDevice> {
-    Ok(match serial {
-        Some(s) => AdbDevice::with_serial(s),
-        None => AdbDevice::autodetect()?,
+fn select_device(args: &Args) -> Result<AdbDevice> {
+    Ok(match (&args.connect, &args.serial) {
+        (Some(addr), _) => AdbDevice::connect_tcp(addr).context("connecting over Wi-Fi")?,
+        (None, Some(s)) => AdbDevice::with_serial(s),
+        (None, None) => AdbDevice::autodetect()?,
     })
 }
 
-fn list_sizes(serial: Option<&str>, decoder: Backend) -> Result<()> {
-    let device = select_device(serial)?;
-    let cameras = phone_cam4linux::list_cameras(&device).context("listing cameras")?;
+fn enable_tcpip(serial: Option<&str>, port: u16) -> Result<()> {
+    let device = match serial {
+        Some(s) => AdbDevice::with_serial(s),
+        None => AdbDevice::autodetect()?,
+    };
+    let address = device
+        .enable_tcpip(port)
+        .context("switching the phone to TCP/IP ADB")?;
+    println!("{address}");
+    log::info!(
+        "phone is now in TCP/IP ADB mode; unplug USB if you like and run: pc4l --connect {address}"
+    );
+    Ok(())
+}
+
+fn list_sizes(device: &AdbDevice, decoder: Backend) -> Result<()> {
+    let cameras = phone_cam4linux::list_cameras(device).context("listing cameras")?;
     for cam in &cameras {
         let facing = match cam.facing {
             Some(Facing::Back) => "back",
@@ -290,12 +321,11 @@ fn list_sizes(serial: Option<&str>, decoder: Backend) -> Result<()> {
 }
 
 fn largest_decodable_size(
-    serial: Option<&str>,
+    device: &AdbDevice,
     facing: Facing,
     decoder: Backend,
 ) -> Result<(u32, u32)> {
-    let device = select_device(serial)?;
-    let cameras = phone_cam4linux::list_cameras(&device).context("listing cameras")?;
+    let cameras = phone_cam4linux::list_cameras(device).context("listing cameras")?;
     let cam: &CameraInfo = cameras
         .iter()
         .find(|c| c.facing == Some(facing))

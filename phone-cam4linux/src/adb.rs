@@ -15,21 +15,32 @@ use std::process::{Child, Command, Stdio};
 
 const DEVICE_SERVER_PATH: &str = "/data/local/tmp/scrcpy-server.jar";
 
-/// A USB-attached Android device, addressed by ADB serial (or the sole attached device).
+/// Default port adbd listens on once switched to TCP/IP mode (`adb tcpip 5555`).
+pub const DEFAULT_TCP_PORT: u16 = 5555;
+
+/// An Android device addressed by ADB serial -- a USB serial, or `host:port` for a
+/// device reached over TCP/IP (see [`AdbDevice::connect_tcp`]).
 #[derive(Debug, Clone)]
 pub struct AdbDevice {
     pub serial: Option<String>,
 }
 
 impl AdbDevice {
-    /// Picks the sole attached USB device, or fails if zero or more than one are present.
+    /// Picks the sole device in the `device` (authorized, online) state, or fails if
+    /// zero or more than one are present. Offline/unauthorized entries are ignored,
+    /// as is the stale `host:port` entry adb keeps after a Wi-Fi device goes away.
     pub fn autodetect() -> Result<Self> {
         let out = adb(&[], &["devices"])?;
         let serials: Vec<&str> = out
             .lines()
             .skip(1)
-            .filter_map(|l| l.split_whitespace().next())
-            .filter(|s| !s.is_empty())
+            .filter_map(|l| {
+                let mut cols = l.split_whitespace();
+                match (cols.next(), cols.next()) {
+                    (Some(serial), Some("device")) => Some(serial),
+                    _ => None,
+                }
+            })
             .collect();
         match serials.len() {
             0 => Err(Error::NoDevice),
@@ -46,6 +57,57 @@ impl AdbDevice {
         Self {
             serial: Some(serial.into()),
         }
+    }
+
+    /// Connects to a device over TCP/IP (`adb connect host:port`; the port defaults
+    /// to [`DEFAULT_TCP_PORT`]) and returns it. The phone must already be in TCP/IP
+    /// mode, see [`Self::enable_tcpip`]. Safe to call repeatedly: an existing
+    /// connection is reported as "already connected" and reused.
+    pub fn connect_tcp(address: &str) -> Result<Self> {
+        let address = if address.contains(':') {
+            address.to_string()
+        } else {
+            format!("{address}:{DEFAULT_TCP_PORT}")
+        };
+        let out = adb(&[], &["connect", &address])?;
+        // `adb connect` exits 0 even on failure; the verdict is in the text.
+        let ok = out.contains("connected to");
+        if !ok {
+            return Err(Error::AdbCommand(format!(
+                "`adb connect {address}` failed: {}",
+                out.trim()
+            )));
+        }
+        Ok(Self::with_serial(address))
+    }
+
+    /// Switches this (USB-attached) device's adbd to listen on TCP `port` and returns
+    /// the `host:port` address to use with [`Self::connect_tcp`], using the phone's
+    /// Wi-Fi IPv4 address. The USB cable can be unplugged afterwards; `adb usb`
+    /// switches back.
+    pub fn enable_tcpip(&self, port: u16) -> Result<String> {
+        let ip = self.wifi_ipv4()?;
+        let port_str = port.to_string();
+        let out = adb(&self.args(&[]), &["tcpip", &port_str])?;
+        if !out.contains("restarting in TCP mode") {
+            return Err(Error::AdbCommand(format!(
+                "unexpected `adb tcpip {port}` output: {}",
+                out.trim()
+            )));
+        }
+        Ok(format!("{ip}:{port}"))
+    }
+
+    /// The phone's IPv4 address on `wlan0` (Wi-Fi), parsed from `ip addr`.
+    pub fn wifi_ipv4(&self) -> Result<String> {
+        let out = adb(&self.args(&[]), &["shell", "ip -4 -o addr show wlan0"])?;
+        parse_ipv4_from_ip_addr(&out).ok_or_else(|| {
+            Error::AdbCommand(format!(
+                "could not find the phone's Wi-Fi IPv4 address (is Wi-Fi on?); \
+                 `ip -4 -o addr show wlan0` printed: {}",
+                out.trim()
+            ))
+        })
     }
 
     fn args<'a>(&'a self, rest: &'a [&'a str]) -> Vec<&'a str> {
@@ -163,6 +225,19 @@ fn spawn_adb(args: &[&str]) -> Result<Child> {
         .spawn()?)
 }
 
+/// Extracts the address from `ip -4 -o addr show wlan0` output such as
+/// `24: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0\       valid_lft ...`.
+fn parse_ipv4_from_ip_addr(out: &str) -> Option<String> {
+    let mut words = out.split_whitespace();
+    while let Some(w) = words.next() {
+        if w == "inet" {
+            let cidr = words.next()?;
+            return Some(cidr.split('/').next()?.to_string());
+        }
+    }
+    None
+}
+
 /// Generates an 8 hex-digit session id, used both as the `scid=` server argument and the
 /// `scrcpy_<scid>` local socket name, matching scrcpy's own convention (letting multiple
 /// concurrent sessions on one device coexist).
@@ -185,5 +260,24 @@ pub fn random_scid_hex8() -> String {
 pub fn close_stdin(child: &mut Child) {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_ipv4_from_ip_addr;
+
+    #[test]
+    fn parses_wlan_address() {
+        let out = "24: wlan0    inet 192.168.1.23/24 brd 192.168.1.255 scope global wlan0\\       valid_lft forever preferred_lft forever\n";
+        assert_eq!(
+            parse_ipv4_from_ip_addr(out).as_deref(),
+            Some("192.168.1.23")
+        );
+        assert_eq!(parse_ipv4_from_ip_addr(""), None);
+        assert_eq!(
+            parse_ipv4_from_ip_addr("Device 'wlan0' does not exist."),
+            None
+        );
     }
 }
