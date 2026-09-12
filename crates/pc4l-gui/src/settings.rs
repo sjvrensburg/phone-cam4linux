@@ -16,10 +16,19 @@ pub enum Action {
     Cancel,
 }
 
-/// Draws the window; `draft` is edited in place. `scale_preview` gets the draft's
-/// scale every frame so it can be shown live.
-pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Action {
+/// The window's requests this frame.
+pub struct Outcome {
+    pub action: Action,
+    /// The draft's scale is settled (slider released, value typed, button
+    /// pressed): apply it now. Not while the slider is being dragged -- the window
+    /// rescaling under the pointer makes the slider jump.
+    pub apply_scale: bool,
+}
+
+/// Draws the window; `draft` is edited in place.
+pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Outcome {
     let mut action = Action::None;
+    let mut apply_scale = false;
     let mut stay_open = *open;
     egui::Window::new("Settings")
         .open(&mut stay_open)
@@ -32,13 +41,24 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Action 
                     ui.heading("Window");
                     ui.horizontal(|ui| {
                         ui.label("Scale");
-                        ui.add(
+                        if ui.button("−").clicked() {
+                            draft.ui.scale = (draft.ui.scale - 0.1).max(0.75);
+                            apply_scale = true;
+                        }
+                        let slider = ui.add(
                             Slider::new(&mut draft.ui.scale, 0.75..=2.5)
                                 .step_by(0.05)
                                 .fixed_decimals(2)
                                 .suffix("×"),
                         )
-                        .on_hover_text("applies as you drag; also ctrl+plus / ctrl+minus / ctrl+0");
+                        .on_hover_text("applies when released; also ctrl+plus / ctrl+minus / ctrl+0");
+                        if slider.drag_stopped() || (slider.changed() && !slider.dragged()) {
+                            apply_scale = true;
+                        }
+                        if ui.button("+").clicked() {
+                            draft.ui.scale = (draft.ui.scale + 0.1).min(2.5);
+                            apply_scale = true;
+                        }
                     });
                     ui.add_space(8.0);
 
@@ -140,7 +160,10 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Action 
         action = Action::Cancel;
     }
     *open = stay_open && action == Action::None;
-    action
+    Outcome {
+        action,
+        apply_scale,
+    }
 }
 
 fn kind_name(b: &BackendConfig) -> &'static str {

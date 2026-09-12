@@ -27,9 +27,21 @@ fn environment() -> Result<Environment> {
         .map_err(|e| anyhow!("initialising ONNX Runtime: {e}"))
 }
 
+/// One model at a time on the runtime. The WebGPU provider shares one Dawn device
+/// between sessions and is not safe to drive from two threads at once: a block
+/// detection overlapping a read segfaulted inside a TopK kernel. Session creation
+/// counts too. Held around every `run` and every load.
+pub static RUNTIME: Mutex<()> = Mutex::new(());
+
+/// Takes [`RUNTIME`], surviving a panic elsewhere.
+pub fn runtime_turn() -> std::sync::MutexGuard<'static, ()> {
+    RUNTIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Opens one graph on `device`. A WebGPU request fails here (not later) if the
 /// provider cannot be registered.
 fn open_session(path: &Path, device: Device) -> Result<Session> {
+    let _turn = runtime_turn();
     let providers: Vec<ExecutionProviderDispatch> = match device {
         Device::WebGpu => vec![WebGPU::default().build().error_on_failure()],
         Device::Cpu => vec![CPU::default().build()],
@@ -162,7 +174,10 @@ impl Transcriber for LocalBackend {
             State::Preparing(s) => bail!("model not ready yet: {s}"),
             State::Failed(e) => bail!("model unavailable: {e}"),
         };
-        let out = model.generate(&img, mode.prompt(), self.max_tokens)?;
+        let out = {
+            let _turn = runtime_turn();
+            model.generate(&img, mode.prompt(), self.max_tokens)?
+        };
         let (readings, silent) = if out.text.is_empty() {
             (Vec::new(), 1)
         } else {

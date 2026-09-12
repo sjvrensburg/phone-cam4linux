@@ -316,7 +316,10 @@ impl BlockDetector for LayoutService {
     fn detect(&self, img: &RgbImage) -> Result<Vec<layout::Block>> {
         let mut state = self.state.lock().unwrap();
         let blocks = match &mut *state {
-            State::Ready(d) => d.detect(img, self.threshold)?,
+            State::Ready(d) => {
+                let _turn = super::runtime_turn();
+                d.detect(img, self.threshold)?
+            }
             State::Preparing(s) => bail!("block detector not ready yet: {s}"),
             State::Failed(e) => bail!("block detector unavailable: {e}"),
         };

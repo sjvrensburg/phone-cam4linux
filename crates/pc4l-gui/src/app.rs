@@ -514,16 +514,16 @@ impl App {
         self.config = new;
     }
 
-    /// The Settings window, when open. The draft's scale is applied live.
+    /// The Settings window, when open. The draft's scale is applied once settled.
     fn settings_window(&mut self, ctx: &egui::Context) {
         if !self.settings_open {
             return;
         }
         let mut draft = self.draft.take().unwrap_or_else(|| self.config.clone());
-        let action = settings::show(ctx, &mut self.settings_open, &mut draft);
-        match action {
+        let outcome = settings::show(ctx, &mut self.settings_open, &mut draft);
+        match outcome.action {
             settings::Action::None => {
-                if (ctx.zoom_factor() - draft.ui.scale).abs() > 1e-3 {
+                if outcome.apply_scale && (ctx.zoom_factor() - draft.ui.scale).abs() > 1e-3 {
                     ctx.set_zoom_factor(draft.ui.scale);
                 }
                 self.draft = Some(draft);
@@ -550,27 +550,26 @@ impl App {
     /// typeset textures, which were rendered for the old pixel density.
     fn track_zoom(&mut self, ctx: &egui::Context) {
         let zoom = ctx.zoom_factor();
-        let shown = self
-            .draft
-            .as_ref()
-            .map_or(self.config.ui.scale, |d| d.ui.scale);
-        if (zoom - shown).abs() > 1e-3 {
+        // Only a change of the zoom itself counts: a draft mid-drag legitimately
+        // differs from it.
+        let changed = self.last_zoom.is_some_and(|z| (z - zoom).abs() > 1e-3);
+        if changed {
             match &mut self.draft {
                 Some(d) => d.ui.scale = zoom,
                 None => {
-                    self.config.ui.scale = zoom;
-                    if let Err(e) = self.config.save() {
-                        log::warn!("saving the window scale: {e:#}");
+                    if (self.config.ui.scale - zoom).abs() > 1e-3 {
+                        self.config.ui.scale = zoom;
+                        if let Err(e) = self.config.save() {
+                            log::warn!("saving the window scale: {e:#}");
+                        }
                     }
                 }
             }
-        }
-        if self.last_zoom != Some(zoom) {
-            self.last_zoom = Some(zoom);
             for entry in &mut self.results {
                 entry.typeset.clear();
             }
         }
+        self.last_zoom = Some(zoom);
     }
 
     pub fn set_dev_zoom(&mut self, zoom: Option<f32>) {
