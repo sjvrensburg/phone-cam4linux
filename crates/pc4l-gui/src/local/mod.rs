@@ -165,15 +165,25 @@ pub fn download_into(dir: &Path, progress: &dyn Fn(String)) -> Result<()> {
         // Anonymous downloads are rate-limited (CI runners share addresses); a
         // Hugging Face token lifts that. The files themselves are public.
         let mut request = agent.get(&url);
-        if let Some(token) = std::env::var_os("HF_TOKEN").filter(|t| !t.is_empty()) {
+        let token = std::env::var_os("HF_TOKEN").filter(|t| !t.is_empty());
+        if let Some(token) = &token {
             request = request.header(
                 "authorization",
                 format!("Bearer {}", token.to_string_lossy()),
             );
         }
-        let mut response = request
-            .call()
-            .with_context(|| format!("downloading {}", file.path))?;
+        // An invalid token is refused (401) even for public files, so say when
+        // one was sent: a stale HF_TOKEN in the environment is the likely cause.
+        let mut response = request.call().with_context(|| {
+            if token.is_some() {
+                format!(
+                    "downloading {} (with HF_TOKEN from the environment)",
+                    file.path
+                )
+            } else {
+                format!("downloading {}", file.path)
+            }
+        })?;
         let mut reader = response.body_mut().as_reader();
         let mut out = std::fs::File::create(&part)?;
         let mut hasher = Sha256::new();
