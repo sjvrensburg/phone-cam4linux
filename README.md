@@ -246,9 +246,11 @@ exercises the loopback/format-negotiation/write path independently of ADB/hardwa
   via crDroid) at 1920x1080, 2992x2992 (openh264) and 4000x3000 (ffmpeg), including
   the GUI, live zoom/torch, and the built-in models on a Radeon 8060S (RADV) via WebGPU.
 - The GUI's built-in models run on WebGPU (Vulkan on Linux), an execution provider ONNX
-  Runtime still calls experimental; it falls back to the CPU if the provider cannot be
-  set up, but a GPU driver fault mid-inference takes the process down. Images are
-  capped at 2048 image tokens for that reason.
+  Runtime still calls experimental; they fall back to the CPU if the provider cannot be
+  set up, and if the GPU is lost mid-inference (a driver reset, `VK_ERROR_DEVICE_LOST`
+  -- a whole page at too large an image budget provokes one) the read fails with a
+  message and both models reload on the CPU for the rest of the session; a restart gets
+  the GPU back. Images are capped at 2048 image tokens by default for that reason.
 - **Protocol pinning**: `src/protocol.rs` implements scrcpy's undocumented
   video-socket wire format, reverse-engineered against the pinned server version in
   `build.rs` (`SCRCPY_VERSION`). Re-verify this module if you bump `SCRCPY_VERSION`.

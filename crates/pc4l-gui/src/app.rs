@@ -427,6 +427,8 @@ pub struct App {
     dev_read: bool,
     /// Development aid: then ask the next backend too.
     dev_second: bool,
+    /// Development aid: retries left for a read refused while a model reloads.
+    dev_read_retries: u32,
     /// Development aid: read every block once there are some.
     dev_read_all: bool,
     /// Development aid: a zoom to apply live, and when the first frame was seen.
@@ -492,6 +494,7 @@ impl App {
             read_all_armed: false,
             dev_read: false,
             dev_second: false,
+            dev_read_retries: 0,
             dev_read_all: false,
             dev_zoom: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
@@ -675,6 +678,7 @@ impl App {
     pub fn set_dev_read(&mut self, on: bool, second: bool) {
         self.dev_read = on;
         self.dev_second = second;
+        self.dev_read_retries = if on { 3 } else { 0 };
     }
 
     pub fn set_settings_open(&mut self, open: bool) {
@@ -2066,6 +2070,21 @@ impl eframe::App for App {
         }
         if self.dev_read && self.backend_ready() {
             self.dev_read = false;
+            self.read();
+        }
+        // A read refused because the model is reloading (a lost GPU) is retried
+        // once the backend is ready again, so the recovery can be scripted.
+        if !self.dev_read
+            && self.pending.is_none()
+            && self.dev_read_retries > 0
+            && self
+                .results
+                .last()
+                .is_some_and(|e| matches!(&e.result, Err(m) if m.contains("try again shortly")))
+            && self.backend_ready()
+        {
+            self.dev_read_retries -= 1;
+            self.results.pop();
             self.read();
         }
         if self.dev_second && self.pending.is_none() && !self.results.is_empty() {

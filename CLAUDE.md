@@ -147,7 +147,10 @@ exe-adjacent `models/<name>/`, then `~/.cache/pc4l/models/<name>/`), and
 and wraps GLM-OCR as a `Transcriber` that prepares on a thread, plus `RUNTIME`, the
 one lock every session load and run takes: the WebGPU EP segfaults on concurrent
 `run` across sessions (microsoft/onnxruntime#32561, open) -- keep it until the
-pinned runtime has the fix. In `app.rs` the crop
+pinned runtime has the fix; and `GPU_LOST`, set by `note_gpu_loss` when a run fails
+with a lost device (with IO binding the loss surfaces as an ORT error, not a
+segfault), after which `attempts()` yields the CPU only and both services drop their
+model and `prepare()` again. In `app.rs` the crop
 is a rectangle plus an optional quad (`Selection`); any hand edit of the crop drops
 the quad (`set_rect`) except dragging a quad corner, which moves that corner and
 refits the rectangle. Block mode (`block_mode`) re-runs the detector whenever the

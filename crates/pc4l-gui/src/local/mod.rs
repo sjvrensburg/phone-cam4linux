@@ -13,6 +13,7 @@ use ort::environment::Environment;
 use ort::ep::{ExecutionProviderDispatch, WebGPU, CPU};
 use ort::session::Session;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 
@@ -63,8 +64,30 @@ fn open_session(path: &Path, device: Device) -> Result<Session> {
     Ok(session)
 }
 
-/// The devices to try for a preference, in order.
+/// Set once the GPU device has been lost (a driver reset -- `VK_ERROR_DEVICE_LOST`
+/// -- which a whole page at too large an image budget provokes). The WebGPU
+/// provider does not recover the device, so from then on everything loads on the
+/// CPU; a restart gets the GPU back.
+pub static GPU_LOST: AtomicBool = AtomicBool::new(false);
+
+/// Whether `e` is the GPU being lost. Records it if so.
+pub(super) fn note_gpu_loss(e: &anyhow::Error) -> bool {
+    let text = format!("{e:#}");
+    let lost = text.contains("DEVICE_LOST")
+        || (text.contains("lost") && (text.contains("Device") || text.contains("device")));
+    if lost {
+        GPU_LOST.store(true, Ordering::SeqCst);
+        log::error!("the GPU device was lost; models reload on the CPU: {text}");
+    }
+    lost
+}
+
+/// The devices to try for a preference, in order -- the CPU alone once the GPU
+/// has been lost.
 fn attempts(device: DevicePref) -> &'static [Device] {
+    if GPU_LOST.load(Ordering::SeqCst) {
+        return &[Device::Cpu];
+    }
     match device {
         DevicePref::Auto => &[Device::WebGpu, Device::Cpu],
         DevicePref::Webgpu => &[Device::WebGpu],
@@ -93,17 +116,33 @@ enum State {
 }
 
 /// The bundled GLM-OCR. Preparation (download + load) starts on construction, on a
-/// thread; reads are refused with the current status until it is done.
+/// thread; reads are refused with the current status until it is done. A lost GPU
+/// mid-read reloads it on the CPU.
 pub struct LocalBackend {
     name: String,
     max_tokens: usize,
+    max_image_tokens: usize,
+    device: DevicePref,
     state: Arc<Mutex<State>>,
 }
 
 impl LocalBackend {
     pub fn new(name: String, device: DevicePref, max_tokens: u32, max_image_tokens: u32) -> Self {
-        let state = Arc::new(Mutex::new(State::Preparing("locating model".into())));
-        let worker_state = Arc::clone(&state);
+        let backend = Self {
+            name,
+            max_tokens: max_tokens as usize,
+            max_image_tokens: max_image_tokens as usize,
+            device,
+            state: Arc::new(Mutex::new(State::Preparing("locating model".into()))),
+        };
+        backend.prepare();
+        backend
+    }
+
+    /// Finds, downloads and loads the model on a thread; the state says how far.
+    fn prepare(&self) {
+        let worker_state = Arc::clone(&self.state);
+        let (device, max_image_tokens) = (self.device, self.max_image_tokens);
         std::thread::Builder::new()
             .name("pc4l-model".into())
             .spawn(move || {
@@ -112,7 +151,7 @@ impl LocalBackend {
                 };
                 let result = models::GLM_OCR
                     .ensure(&set)
-                    .and_then(|dir| load(&dir, device, max_image_tokens as usize, &set));
+                    .and_then(|dir| load(&dir, device, max_image_tokens, &set));
                 *worker_state.lock().unwrap() = match result {
                     Ok(model) => {
                         log::info!("GLM-OCR ready on {}", model.device().name());
@@ -125,11 +164,13 @@ impl LocalBackend {
                 };
             })
             .expect("spawning model thread");
-        Self {
-            name,
-            max_tokens: max_tokens as usize,
-            state,
-        }
+    }
+
+    /// Drops a model whose GPU is gone and reloads on the CPU. `state` is the
+    /// caller's lock on the state.
+    fn reload_after_gpu_loss(&self, state: &mut State) {
+        *state = State::Preparing("GPU lost — reloading on the CPU".into());
+        self.prepare();
     }
 }
 
@@ -183,9 +224,25 @@ impl Transcriber for LocalBackend {
             State::Preparing(s) => bail!("model not ready yet: {s}"),
             State::Failed(e) => bail!("model unavailable: {e}"),
         };
+        // The other model may have lost the GPU under this one.
+        if model.device() == Device::WebGpu && GPU_LOST.load(Ordering::SeqCst) {
+            self.reload_after_gpu_loss(&mut state);
+            bail!("the GPU was lost; the model is reloading on the CPU, try again shortly");
+        }
         let out = {
             let _turn = runtime_turn();
-            model.generate(&img, prompt, self.max_tokens)?
+            model.generate(&img, prompt, self.max_tokens)
+        };
+        let out = match out {
+            Ok(out) => out,
+            Err(e) if note_gpu_loss(&e) => {
+                self.reload_after_gpu_loss(&mut state);
+                bail!(
+                    "the GPU was lost mid-read (a driver reset); the model is reloading on \
+                     the CPU, try again shortly. A smaller region or image budget avoids it."
+                );
+            }
+            Err(e) => return Err(e),
         };
         let (readings, silent) = if out.text.is_empty() {
             (Vec::new(), 1)

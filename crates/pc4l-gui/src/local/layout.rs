@@ -5,7 +5,7 @@
 //! follows a skewed block where the axis-aligned box would not. The post-processing
 //! (mask → polygon → quad) follows PaddleX's `layout_analysis` processors.
 
-use super::{attempts, models, open_session, Device, DevicePref};
+use super::{attempts, models, open_session, Device, DevicePref, GPU_LOST};
 use crate::app::Crop;
 use crate::layout::{self, BlockDetector};
 use anyhow::{anyhow, bail, Result};
@@ -16,6 +16,7 @@ use imageproc::point::Point;
 use ndarray::{Array, ArrayD, IxDyn};
 use ort::session::Session;
 use ort::value::Tensor;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -289,12 +290,24 @@ enum State {
 pub struct LayoutService {
     state: Arc<Mutex<State>>,
     threshold: f32,
+    device: DevicePref,
 }
 
 impl LayoutService {
     pub fn new(device: DevicePref, threshold: f32) -> Self {
-        let state = Arc::new(Mutex::new(State::Preparing("locating model".into())));
-        let worker_state = Arc::clone(&state);
+        let service = Self {
+            state: Arc::new(Mutex::new(State::Preparing("locating model".into()))),
+            threshold,
+            device,
+        };
+        service.prepare();
+        service
+    }
+
+    /// Finds, downloads and loads the model on a thread; the state says how far.
+    fn prepare(&self) {
+        let worker_state = Arc::clone(&self.state);
+        let device = self.device;
         std::thread::Builder::new()
             .name("pc4l-layout".into())
             .spawn(move || {
@@ -327,7 +340,6 @@ impl LayoutService {
                 };
             })
             .expect("spawning layout thread");
-        Self { state, threshold }
     }
 }
 
@@ -348,8 +360,21 @@ impl BlockDetector for LayoutService {
         let mut state = self.state.lock().unwrap();
         let blocks = match &mut *state {
             State::Ready(d) => {
+                if d.device() == Device::WebGpu && GPU_LOST.load(Ordering::SeqCst) {
+                    *state = State::Preparing("GPU lost — reloading on the CPU".into());
+                    self.prepare();
+                    bail!("the GPU was lost; the block detector is reloading on the CPU");
+                }
                 let _turn = super::runtime_turn();
-                d.detect(img, self.threshold)?
+                match d.detect(img, self.threshold) {
+                    Ok(blocks) => blocks,
+                    Err(e) if super::note_gpu_loss(&e) => {
+                        *state = State::Preparing("GPU lost — reloading on the CPU".into());
+                        self.prepare();
+                        bail!("the GPU was lost; the block detector is reloading on the CPU");
+                    }
+                    Err(e) => return Err(e),
+                }
             }
             State::Preparing(s) => bail!("block detector not ready yet: {s}"),
             State::Failed(e) => bail!("block detector unavailable: {e}"),
