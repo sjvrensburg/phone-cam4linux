@@ -114,7 +114,9 @@ trait, `Block`/`Quad` in view space, `Role` (the 25 classes folded into
 text/formula/figure/other -- colour and prompt follow it, `Mode::Formula` for a
 formula block) and the perspective `rectify` (imageproc) a
 non-rectangular block goes through before it is shown or read -- feature-independent
-so the window builds without a detector; `settings.rs`: the Settings window editing
+so the window builds without a detector; `history.rs`: every finished read of the
+session (`App::history`, appended alongside `results`, which only ever drops its
+prefix -- "copy all" relies on that), Markdown export by capture; `settings.rs`: the Settings window editing
 a draft `Config`, applied by `App::apply_config` (backends whose entry is unchanged
 are kept, so the local model is not reloaded; the detector is rebuilt through the
 `DetectorFactory` main.rs passes in; the scale is egui's zoom factor and the value

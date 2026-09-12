@@ -13,6 +13,7 @@
 //! rectangle (a curved or tilted page) is rectified before it is shown or read. The
 //! crop's corners can be dragged, so a block is a starting point, not a verdict.
 
+use crate::history::{self, History};
 use crate::layout::{self, Block, BlockDetector, Quad, Role};
 use crate::settings;
 use crate::stream::{Shared, Status, Worker};
@@ -394,6 +395,11 @@ pub struct App {
     pending: Option<PendingRead>,
     /// Readings for the current capture, oldest first.
     results: Vec<ResultEntry>,
+    /// Every read of the session.
+    history: History,
+    history_open: bool,
+    /// How many captures so far; history entries say which they came from.
+    capture_seq: u32,
     typesetter: Option<Arc<dyn Typesetter>>,
     /// Show readings typeset (maths rendered) rather than as raw text.
     typeset_on: bool,
@@ -467,6 +473,9 @@ impl App {
             ctx: None,
             pending: None,
             results: Vec::new(),
+            history: History::default(),
+            history_open: false,
+            capture_seq: 0,
             typesetter: typesetter.clone(),
             typeset_on: typesetter.is_some(),
             last_zoom: None,
@@ -526,6 +535,72 @@ impl App {
             ctx.set_zoom_factor(new.ui.scale);
         }
         self.config = new;
+    }
+
+    /// The History window: every reading of the session, newest first, with copy
+    /// and save-as-Markdown.
+    fn history_window(&mut self, ctx: &egui::Context) {
+        if !self.history_open {
+            return;
+        }
+        let mut open = true;
+        let mut save = false;
+        let mut copy = false;
+        egui::Window::new("Readings this session")
+            .open(&mut open)
+            .default_width(560.0)
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Save as Markdown").clicked() {
+                        save = true;
+                    }
+                    if ui.button("Copy all").clicked() {
+                        copy = true;
+                    }
+                    ui.weak(format!(
+                        "{} reading{}",
+                        self.history.entries.len(),
+                        if self.history.entries.len() == 1 {
+                            ""
+                        } else {
+                            "s"
+                        }
+                    ));
+                });
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for e in self.history.entries.iter().rev() {
+                            ui.horizontal(|ui| {
+                                ui.weak(e.at.format("%H:%M:%S").to_string());
+                                ui.weak(format!("capture {}", e.capture));
+                                ui.strong(&e.what);
+                                if let Ok(t) = &e.result {
+                                    ui.weak(&t.backend);
+                                }
+                                if ui.small_button("copy").clicked() {
+                                    ui.ctx().copy_text(e.text());
+                                }
+                            });
+                            let text = e.text();
+                            ui.add(egui::Label::new(text).wrap());
+                            ui.separator();
+                        }
+                    });
+            });
+        if save {
+            match self.history.save(&self.save_dir) {
+                Ok(path) => self.say(format!("readings saved to {}", path.display())),
+                Err(e) => self.say(format!("saving readings failed: {e}")),
+            }
+        }
+        if copy {
+            ctx.copy_text(history::joined(self.history.entries.iter()));
+            self.say("all readings copied");
+        }
+        self.history_open = open;
     }
 
     /// The Settings window, when open. The draft's scale is applied once settled.
@@ -693,6 +768,7 @@ impl App {
         } else if let Some(frame) = self.shared().latest() {
             self.say(format!("captured {}x{}", frame.width, frame.height));
             self.captured = Some(frame);
+            self.capture_seq += 1;
         }
     }
 
@@ -870,6 +946,19 @@ impl App {
             };
             if let Some(result) = done {
                 let label = label.clone();
+                let what = label.clone().unwrap_or_else(|| {
+                    if self.crop.is_some() {
+                        "box".into()
+                    } else {
+                        "page".into()
+                    }
+                });
+                self.history.push(history::Entry {
+                    at: chrono::Local::now(),
+                    capture: self.capture_seq,
+                    what,
+                    result: result.clone(),
+                });
                 self.results.push(ResultEntry {
                     label,
                     result,
@@ -1646,8 +1735,27 @@ impl App {
             {
                 ui.weak(status);
             }
-            if !self.results.is_empty() && ui.small_button("clear").clicked() {
-                self.results.clear();
+            if !self.results.is_empty() {
+                if ui
+                    .small_button("copy all")
+                    .on_hover_text("every reading below, in this order, as text")
+                    .clicked()
+                {
+                    let n = self.results.len();
+                    let text = history::joined(self.history.entries.iter().rev().take(n).rev());
+                    ui.ctx().copy_text(text);
+                    self.say("readings copied");
+                }
+                if ui.small_button("clear").clicked() {
+                    self.results.clear();
+                }
+            }
+            if ui
+                .small_button(format!("history ({})  [H]", self.history.entries.len()))
+                .on_hover_text("every reading this session; save them as Markdown")
+                .clicked()
+            {
+                self.history_open = !self.history_open;
             }
             if self.typesetter.is_some() {
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -1716,6 +1824,9 @@ impl App {
         }
         if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Comma)) {
             self.toggle_settings();
+        }
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(Key::H)) {
+            self.history_open = !self.history_open;
         }
         if tab != 0 {
             self.step_block(tab);
@@ -1838,6 +1949,7 @@ impl eframe::App for App {
         }
         self.track_zoom(ui.ctx());
         self.settings_window(ui.ctx());
+        self.history_window(ui.ctx());
         self.fps.tick(self.shared().frames());
         self.handle_keys(ui.ctx());
         self.handle_screenshot(ui.ctx());

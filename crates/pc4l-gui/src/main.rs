@@ -3,6 +3,7 @@
 //! the `phone-cam4linux` library; this crate is the window and the reconnect policy.
 
 mod app;
+mod history;
 mod layout;
 #[cfg(feature = "local-model")]
 mod local;

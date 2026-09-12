@@ -142,7 +142,11 @@ are shown **typeset**: the LaTeX the models write for maths (`$\hat{y}_i \neq y_
 is converted to Typst by [MiTeX](https://github.com/mitex-rs/mitex) and rendered by
 [Typst](https://typst.app) with its embedded fonts, so a formula can be checked
 against the ink at a glance; the `typeset` checkbox shows the raw text instead, `copy`
-always copies the raw text, and anything that does not convert stays text. (The
+always copies the raw text, and anything that does not convert stays text. Every
+reading of the session is kept: **history** (`H`) lists them all with the capture they
+came from, **copy all** puts the current list on the clipboard in page order, and
+**Save as Markdown** writes the session to `~/Pictures/pc4l/pc4l-readings-<time>.md`,
+a section per capture. (The
 `math` cargo feature, on by default; about 40 MB of the binary.) Backends live in
 `~/.config/pc4l/gui.toml` (written with defaults on first run) and are edited in the
 window's **Settings** (`ctrl+,`) -- an OpenAI-compatible endpoint's URL, model and API
@@ -190,7 +194,7 @@ window. Reads and detection are refused until the model is ready.
 Keys: `space` capture/retake, `enter` read, `L` block mode on/off, `tab`/`shift+tab`
 next/previous block, `ctrl+enter` read all blocks, `esc` clear the region (then
 retake), `R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`),
-`ctrl+,` settings, `ctrl+plus`/`ctrl+minus`/`ctrl+0` window scale.
+`ctrl+,` settings, `H` reading history, `ctrl+plus`/`ctrl+minus`/`ctrl+0` window scale.
 Phone zoom: the slider, the wheel over the preview, `+`/`-`, `0` to reset. The
 region: drag inside it to move it, drag a corner handle to reshape it, arrow keys to
 nudge (`shift` for one pixel), `[`/`]` or the wheel over the zoomed view to shrink/grow
