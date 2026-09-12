@@ -56,6 +56,33 @@ impl CameraInfo {
     }
 }
 
+/// The largest size the `facing` camera offers that `decoder` can stream
+/// ([`is_usable_size`]): what a "maximum resolution" setting resolves to. Talks to
+/// the phone, so call it per connection -- the phone may not be there yet, or a
+/// different one may show up after a reconnect.
+pub fn largest_usable_size(
+    device: &AdbDevice,
+    facing: Facing,
+    decoder: Backend,
+) -> Result<(u32, u32)> {
+    let cameras = list_cameras(device)?;
+    let cam = cameras
+        .iter()
+        .find(|c| c.facing == Some(facing))
+        .ok_or_else(|| Error::Protocol(format!("phone reports no {facing:?}-facing camera")))?;
+    let size = cam
+        .largest_size(|w, h| is_usable_size(w, h, decoder))
+        .ok_or_else(|| {
+            Error::Protocol(format!(
+                "camera {} offers no size the {} decoder can handle",
+                cam.id,
+                decoder.name()
+            ))
+        })?;
+    log::info!("maximum resolution resolved to {}x{}", size.0, size.1);
+    Ok(size)
+}
+
 /// Runs the embedded server in listing mode on `device` and parses its report.
 pub fn list_cameras(device: &AdbDevice) -> Result<Vec<CameraInfo>> {
     device.push_server_jar(crate::session::SERVER_JAR)?;

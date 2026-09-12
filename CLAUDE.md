@@ -15,11 +15,14 @@ conversion, V4L2 sink) is implemented here.
 ```
 cargo build --release                 # fetches scrcpy-server.jar on first build (needs network)
 cargo build --release --features ffmpeg   # + system libavcodec decoder (needs full FFmpeg headers)
-cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion)
+cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion, GUI crop geometry)
 cargo test -p phone-cam4linux protocol::tests::parses_codec_meta   # single test
 cargo clippy --workspace --all-targets [--features ffmpeg]
 cargo fmt --all -- --check             # CI enforces this and clippy -D warnings, both feature sets
 ```
+
+`pc4l-gui --rotate 270 --screenshot-after 8 --screenshot-path /tmp/gui.png` renders the
+window against the phone and writes a PNG of it.
 
 Run against a phone (USB debugging authorized, Android 12+):
 ```
@@ -81,6 +84,12 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
 handling, the reconnect-with-backoff loop (keeping the V4L2 sink open across sessions),
 `--list-sizes` and `--resolution max`. `contrib/` has boot-time loopback config and a
 systemd user unit.
+
+`crates/pc4l-gui` is the egui document-camera window (`stream.rs`: worker thread with
+the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
+*view* (rotated) coordinates mapped back to the source frame, capture, save). The hidden
+`--screenshot-after SECS --screenshot-path FILE` and `--dev-crop X,Y,W,H` flags let you
+check the UI from a script (GNOME blocks external screenshots of the window).
 
 ### Non-obvious protocol details (hard-won, don't regress)
 

@@ -79,6 +79,23 @@ Sizes that aren't a multiple of 8 in both dimensions (e.g. 4000x2250) are listed
 phone but unusable: scrcpy rounds them for the encoder and the camera then refuses the
 rounded size. `--list-sizes` marks these; `--resolution max` skips them.
 
+### Desktop window (`pc4l-gui`)
+
+`pc4l-gui` is a document-camera window over the same pipeline, with no V4L2 device
+needed: a live view, a drag-to-select region shown at native pixels beside it (that
+*is* the zoom), Capture to freeze the frame, and Save PNG for the region or the whole
+frame at full resolution.
+
+```
+./target/release/pc4l-gui --rotate 270           # phone on a stand, mounted sideways
+./target/release/pc4l-gui --device /dev/video10  # also feed the loopback device
+```
+
+Keys: `space` capture/retake, `esc` clear the region, `R`/`shift+R` rotate,
+`ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`). `--resolution` defaults to
+`max`; `--facing`, `--connect`, `--serial`, `--bitrate`, `--fps` and `--decoder`
+are as for `pc4l`. It reconnects with backoff like the CLI.
+
 ### Wireless (TCP/IP ADB)
 
 Once, with the phone on USB and Wi-Fi:

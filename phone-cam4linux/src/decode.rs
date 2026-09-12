@@ -68,6 +68,7 @@ impl Backend {
 
 /// A decoded I420 (planar YUV 4:2:0) frame, tightly packed (row padding removed),
 /// ready for pixel-format conversion.
+#[derive(Clone)]
 pub struct YuvFrame {
     pub width: usize,
     pub height: usize,

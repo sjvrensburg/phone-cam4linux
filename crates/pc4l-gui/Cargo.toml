@@ -1,0 +1,26 @@
+[package]
+name = "pc4l-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "GUI: live view, crop and capture an Android phone's camera as a document camera"
+
+[[bin]]
+name = "pc4l-gui"
+path = "src/main.rs"
+
+[dependencies]
+phone-cam4linux = { path = "../../phone-cam4linux" }
+anyhow.workspace = true
+clap.workspace = true
+log.workspace = true
+env_logger.workspace = true
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+egui = "0.36"
+image = { version = "0.25", default-features = false, features = ["png"] }
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
+[features]
+default = []
+ffmpeg = ["phone-cam4linux/ffmpeg"]

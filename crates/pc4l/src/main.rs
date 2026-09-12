@@ -1,9 +1,9 @@
 use anyhow::{Context, Result};
 use clap::Parser;
 use phone_cam4linux::adb::AdbDevice;
-use phone_cam4linux::cameras::is_usable_size;
+use phone_cam4linux::cameras::{is_usable_size, largest_usable_size};
 use phone_cam4linux::decode::Backend;
-use phone_cam4linux::{loopback, sink::V4l2Sink, CameraInfo, ConnectOptions, Facing};
+use phone_cam4linux::{loopback, sink::V4l2Sink, ConnectOptions, Facing};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -279,11 +279,10 @@ fn resolve_resolution(
     Ok(match resolution {
         Resolution::PhoneDefault => None,
         Resolution::Fixed(w, h) => Some((w, h)),
-        Resolution::Max => Some(largest_decodable_size(
-            &select_device(args)?,
-            facing,
-            decoder,
-        )?),
+        Resolution::Max => Some(
+            largest_usable_size(&select_device(args)?, facing, decoder)
+                .context("resolving --resolution max")?,
+        ),
     })
 }
 
@@ -354,23 +353,6 @@ fn list_sizes(device: &AdbDevice, decoder: Backend) -> Result<()> {
         decoder.name()
     );
     Ok(())
-}
-
-fn largest_decodable_size(
-    device: &AdbDevice,
-    facing: Facing,
-    decoder: Backend,
-) -> Result<(u32, u32)> {
-    let cameras = phone_cam4linux::list_cameras(device).context("listing cameras")?;
-    let cam: &CameraInfo = cameras
-        .iter()
-        .find(|c| c.facing == Some(facing))
-        .with_context(|| format!("phone reports no {facing:?}-facing camera"))?;
-    let size = cam
-        .largest_size(|w, h| is_usable_size(w, h, decoder))
-        .context("camera offers no size the decoder can handle")?;
-    log::info!("--resolution max resolved to {}x{}", size.0, size.1);
-    Ok(size)
 }
 
 fn parse_resolution(s: &str) -> Result<(u32, u32)> {

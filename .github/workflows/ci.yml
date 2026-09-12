@@ -31,8 +31,9 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          # nasm: openh264 assembly; libclang: bindgen for the v4l/ffmpeg -sys crates.
-          sudo apt-get install -y --no-install-recommends nasm libclang-dev pkg-config ${{ matrix.apt }}
+          # nasm: openh264 assembly; libclang: bindgen for the v4l/ffmpeg -sys crates;
+          # xkbcommon/wayland: eframe (pc4l-gui) links these on Linux.
+          sudo apt-get install -y --no-install-recommends nasm libclang-dev pkg-config libxkbcommon-dev libwayland-dev ${{ matrix.apt }}
 
       - uses: dtolnay/rust-toolchain@stable
         with:
