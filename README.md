@@ -13,7 +13,8 @@ this crate implements natively in Rust is:
 
 - the ADB plumbing to push and launch that server (via the system `adb` binary),
 - scrcpy's client-side video-socket wire protocol (`src/protocol.rs`),
-- H.264 decoding via `openh264` (statically linked, no system FFmpeg),
+- H.264 decoding via `openh264` (statically linked, no system FFmpeg) or,
+  optionally, the system FFmpeg (`--features ffmpeg`, no frame-size ceiling),
 - I420 -> YUYV422 conversion, and
 - a V4L2 sink that writes frames into a `v4l2loopback` device.
 
@@ -28,38 +29,62 @@ mirroring, audio, or input control.
   debugging authorized.
 - Android 12+ on the phone (camera-as-video-source requires it).
 - `v4l2loopback` kernel module installed (`v4l2loopback-dkms` on most distros).
-  `pc4l` loads it automatically via `pkexec modprobe` if the target device is
-  missing; you can also load it yourself:
+  If the target `/dev/videoN` is missing, `pc4l` creates it via `pkexec` (which
+  prompts for your password each time). To avoid that permanently, create the device
+  at boot instead:
   ```
-  sudo modprobe v4l2loopback video_nr=10 card_label="Android Cam" exclusive_caps=1
+  sudo contrib/install-system-config.sh    # modprobe.d + modules-load.d for /dev/video10
   ```
+- Optional, for the `ffmpeg` feature: libavcodec/libavutil development headers from a
+  *full* FFmpeg (on Fedora that's RPM Fusion's `ffmpeg-devel`; `ffmpeg-free` lacks the
+  native `h264` decoder).
 
 ## Usage
 
 ```
-cargo build --release
-./target/release/pc4l --facing back --resolution 3840x2160 --bitrate 30 --device /dev/video10
+cargo build --release                      # or: cargo build --release --features ffmpeg
+./target/release/pc4l --list-sizes         # see what the phone offers
+./target/release/pc4l --facing back --resolution max --bitrate 30 --device /dev/video10
 ```
 
 Then point any V4L2-consuming app (browser, `ffplay`, OBS, etc.) at `/dev/video10`.
+`pc4l` keeps running until Ctrl-C: if the phone disconnects, the server dies, or the
+stream stalls, it reconnects with backoff while keeping the V4L2 device open, so
+consumers don't lose the camera (`--no-reconnect` to exit instead).
 
 Options:
 
+- `--list-sizes` -- print each camera's supported capture sizes and exit, marking the
+  ones the current decoder can't handle.
 - `--facing front|back` -- which camera (default `back`).
-- `--resolution WxH` -- capture size; must be one of the camera's supported sizes.
-  List them with `adb shell CLASSPATH=/data/local/tmp/scrcpy-server.jar app_process / com.genymobile.scrcpy.Server <ver> list_camera_sizes=true` (after a first run has pushed the jar). Defaults to the phone's choice.
+- `--resolution WxH|max` -- capture size; must be one of the sizes from `--list-sizes`
+  (and a multiple of 8 in both dimensions, see below). `max` picks the largest usable
+  one. Defaults to the phone's choice.
 - `--bitrate MBPS` -- H.264 bitrate in Mbit/s (default `30`). Higher is crisper for
   reading text/documents.
 - `--fps N` -- cap the frame rate.
+- `--decoder openh264|ffmpeg` -- H.264 decoder (`ffmpeg` only with the feature; it's
+  then the default).
 - `--serial SERIAL` -- pick a device when more than one is attached.
+- `--no-reconnect` -- exit on the first failure instead of retrying.
 
 ### Document-camera use / resolution ceiling
 
-The bundled `openh264` decoder handles up to **3840x2160** (≈8.3 MP). Larger camera
-modes such as 4000x3000 (12 MP) are rejected by openh264 and will fail with a decode
-error suggesting a lower resolution. For a document camera, `--resolution 3840x2160
---bitrate 30` is the sharpest supported setting; the sensor's native 4:3 sizes below
-the ceiling (e.g. 1440x1080) are also available if you need that aspect ratio.
+The bundled `openh264` decoder is hard-limited to H.264 level 5.2 frame sizes
+(36864 macroblocks: 3840x2160 fits, and so does 2992x2992; 4000x3000 does not).
+Build with `--features ffmpeg` to decode with the system libavcodec instead, which has
+no such limit -- 4000x3000 (12 MP) at 25 fps has been verified that way.
+
+Sizes that aren't a multiple of 8 in both dimensions (e.g. 4000x2250) are listed by the
+phone but unusable: scrcpy rounds them for the encoder and the camera then refuses the
+rounded size. `--list-sizes` marks these; `--resolution max` skips them.
+
+### Running as a service
+
+`contrib/systemd/pc4l.service` is a systemd *user* unit that keeps the camera exposed
+whenever the phone is reachable (see the comments in the file for install steps). It
+relies on the boot-time device from `contrib/install-system-config.sh` and on `pc4l`
+being installed (`cargo install --path crates/pc4l [--features ffmpeg]`).
 
 ### Testing the V4L2 sink without a phone
 
@@ -73,10 +98,11 @@ exercises the loopback/format-negotiation/write path independently of ADB/hardwa
 ## Status / caveats
 
 - Verified end-to-end against a real device (Samsung SM-A307FN running Android 13
-  via crDroid) at 1920x1080 and 3840x2160.
+  via crDroid) at 1920x1080, 2992x2992 (openh264) and 4000x3000 (ffmpeg).
 - **Protocol pinning**: `src/protocol.rs` implements scrcpy's undocumented
   video-socket wire format, reverse-engineered against the pinned server version in
   `build.rs` (`SCRCPY_VERSION`). Re-verify this module if you bump `SCRCPY_VERSION`.
 - USB ADB only for now (no Wi-Fi/TCP ADB, ratified as v1 scope).
 - No audio, display mirroring, or input control -- camera-to-V4L2 only.
-- Decode ceiling is openh264's; see "resolution ceiling" above.
+- Decode ceiling is openh264's unless built with `--features ffmpeg`; see
+  "resolution ceiling" above.

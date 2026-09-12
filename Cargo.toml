@@ -16,5 +16,5 @@ env_logger = "0.11"
 clap = { version = "4", features = ["derive"] }
 openh264 = "0.9"
 v4l = "0.14"
-ctrlc = "3"
+ctrlc = { version = "3", features = ["termination"] }
 ffmpeg-next = "9"

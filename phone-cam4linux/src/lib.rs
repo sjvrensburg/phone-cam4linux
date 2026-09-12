@@ -15,6 +15,6 @@ pub mod protocol;
 pub mod session;
 pub mod sink;
 
-pub use error::{Error, Result};
 pub use cameras::{list_cameras, CameraInfo};
+pub use error::{Error, Result};
 pub use session::{CameraSession, ConnectOptions, Facing};

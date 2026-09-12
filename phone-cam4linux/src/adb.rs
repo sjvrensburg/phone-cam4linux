@@ -63,10 +63,7 @@ impl AdbDevice {
         let tmp = std::env::temp_dir().join("phone-cam4linux-scrcpy-server.jar");
         std::fs::write(&tmp, jar)?;
         let tmp_str = tmp.to_string_lossy().to_string();
-        adb(
-            &self.args(&[]),
-            &["push", &tmp_str, DEVICE_SERVER_PATH],
-        )?;
+        adb(&self.args(&[]), &["push", &tmp_str, DEVICE_SERVER_PATH])?;
         Ok(())
     }
 

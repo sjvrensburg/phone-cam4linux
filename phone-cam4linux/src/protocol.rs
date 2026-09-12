@@ -94,9 +94,7 @@ fn read_exact_or_eof<R: Read>(r: &mut R, buf: &mut [u8]) -> Result<bool> {
         match r.read(&mut buf[filled..]) {
             Ok(0) if filled == 0 => return Ok(false),
             Ok(0) => {
-                return Err(Error::Protocol(
-                    "connection closed mid-header".to_string(),
-                ));
+                return Err(Error::Protocol("connection closed mid-header".to_string()));
             }
             Ok(n) => filled += n,
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,

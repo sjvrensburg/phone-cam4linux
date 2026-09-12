@@ -5,7 +5,7 @@ use crate::error::{Error, Result};
 use std::path::Path;
 use v4l::buffer::Type;
 use v4l::device::Device;
-use v4l::format::{FourCC, Format};
+use v4l::format::{Format, FourCC};
 use v4l::io::mmap::Stream as MmapStream;
 use v4l::io::traits::OutputStream;
 use v4l::video::Output;
@@ -22,9 +22,8 @@ impl V4l2Sink {
     /// lazily on the first `write_frame` call (buffer allocation needs `&self`, and we
     /// want a clean error if the negotiated format doesn't match what was requested).
     pub fn open(path: &Path, width: u32, height: u32) -> Result<Self> {
-        let device = Device::with_path(path).map_err(|e| {
-            Error::Sink(format!("opening {}: {e}", path.display()))
-        })?;
+        let device = Device::with_path(path)
+            .map_err(|e| Error::Sink(format!("opening {}: {e}", path.display())))?;
 
         let fmt = Format::new(width, height, FourCC::new(b"YUYV"));
         let actual = Output::set_format(&device, &fmt)

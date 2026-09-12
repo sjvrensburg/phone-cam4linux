@@ -156,10 +156,10 @@ fn depad(plane: &[u8], stride: usize, width: usize, height: usize) -> Vec<u8> {
 mod ffmpeg_backend {
     use super::{depad, YuvFrame};
     use crate::error::{Error, Result};
-    use ffmpeg_next as ffmpeg;
     use ffmpeg::codec::{decoder, packet::Packet, Id};
     use ffmpeg::format::Pixel;
     use ffmpeg::frame::Video;
+    use ffmpeg_next as ffmpeg;
 
     pub struct FfmpegDecoder {
         decoder: decoder::Video,

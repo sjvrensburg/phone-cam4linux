@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # build.rs downloads and SHA256-verifies scrcpy-server on a clean build; cache it
+  # across runs so CI doesn't hit GitHub releases every time.
+  PHONE_CAM4LINUX_SERVER_JAR: ${{ github.workspace }}/.cache/scrcpy-server.jar
+
+jobs:
+  test:
+    name: test (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - features: default
+            args: ""
+            apt: ""
+          - features: ffmpeg
+            args: "--features ffmpeg"
+            apt: "libavcodec-dev libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev libswscale-dev libswresample-dev"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          # nasm: openh264 assembly; libclang: bindgen for the v4l/ffmpeg -sys crates.
+          sudo apt-get install -y --no-install-recommends nasm libclang-dev pkg-config ${{ matrix.apt }}
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+
+      - name: Cache scrcpy-server jar
+        id: jar
+        uses: actions/cache@v4
+        with:
+          path: .cache/scrcpy-server.jar
+          key: scrcpy-server-${{ hashFiles('phone-cam4linux/build.rs') }}
+
+      - name: Fetch scrcpy-server jar
+        if: steps.jar.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p .cache
+          version=$(sed -n 's/^const SCRCPY_VERSION: &str = "\(.*\)";/\1/p' phone-cam4linux/build.rs)
+          curl -fsSL -o .cache/scrcpy-server.jar \
+            "https://github.com/Genymobile/scrcpy/releases/download/v${version}/scrcpy-server-v${version}"
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets ${{ matrix.args }} -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace ${{ matrix.args }}
+
+      - name: Build release CLI
+        run: cargo build --release -p pc4l ${{ matrix.args }}

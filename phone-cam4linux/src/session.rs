@@ -7,9 +7,9 @@ use crate::error::{Error, Result};
 use crate::protocol;
 use crate::sink::V4l2Sink;
 use std::io::BufReader;
+use std::io::Read;
 use std::net::TcpStream;
 use std::path::Path;
-use std::io::Read;
 use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -274,10 +274,11 @@ impl<R: Read> Read for Interruptible<'_, R> {
                     self.last_data = Instant::now();
                     return Ok(n);
                 }
-                Err(e) if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                ) =>
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                    ) =>
                 {
                     if self.stop.load(Ordering::Relaxed) {
                         return Err(std::io::Error::other(StopRequested));
@@ -385,8 +386,14 @@ impl ServerLog {
     fn attach(child: &mut Child) -> Self {
         let log = Self::default();
         for pipe in [
-            child.stdout.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
-            child.stderr.take().map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn std::io::Read + Send>),
         ]
         .into_iter()
         .flatten()
@@ -394,7 +401,10 @@ impl ServerLog {
             let lines = Arc::clone(&log.lines);
             std::thread::spawn(move || {
                 use std::io::BufRead;
-                for line in BufReader::new(pipe).lines().map_while(std::result::Result::ok) {
+                for line in BufReader::new(pipe)
+                    .lines()
+                    .map_while(std::result::Result::ok)
+                {
                     let line = line.trim_end().to_string();
                     if line.is_empty() {
                         continue;

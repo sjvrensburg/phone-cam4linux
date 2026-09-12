@@ -71,7 +71,11 @@ pub fn ensure_device(video_nr: u32, card_label: &str) -> Result<()> {
     // actually open it, not merely until it exists.
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
-        match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+        match std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+        {
             Ok(_) => return Ok(()),
             Err(e) if std::time::Instant::now() > deadline => {
                 return Err(Error::Loopback(format!(

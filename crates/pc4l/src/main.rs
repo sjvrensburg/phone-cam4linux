@@ -126,7 +126,11 @@ fn main() -> Result<()> {
     };
     let resolution = match args.resolution.as_deref() {
         None => None,
-        Some("max") => Some(largest_decodable_size(args.serial.as_deref(), facing, decoder)?),
+        Some("max") => Some(largest_decodable_size(
+            args.serial.as_deref(),
+            facing,
+            decoder,
+        )?),
         Some(s) => {
             let (w, h) = parse_resolution(s)?;
             anyhow::ensure!(
@@ -161,7 +165,7 @@ fn main() -> Result<()> {
     stream_loop(&args.device, opts, !args.no_reconnect, &stop)
 }
 
-/// First Ctrl-C asks the pipeline to wind down cleanly (server stopped, adb forward
+/// First Ctrl-C (or SIGTERM, e.g. from systemd) asks the pipeline to wind down cleanly (server stopped, adb forward
 /// removed); a second one exits immediately in case the first is stuck.
 fn install_ctrlc_handler() -> Result<Arc<AtomicBool>> {
     let stop = Arc::new(AtomicBool::new(false));

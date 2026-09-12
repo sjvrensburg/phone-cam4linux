@@ -14,15 +14,24 @@ conversion, V4L2 sink) is implemented here.
 
 ```
 cargo build --release                 # fetches scrcpy-server.jar on first build (needs network)
-cargo test --workspace                 # unit tests (protocol parser, pixel conversion)
+cargo build --release --features ffmpeg   # + system libavcodec decoder (needs full FFmpeg headers)
+cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion)
 cargo test -p phone-cam4linux protocol::tests::parses_codec_meta   # single test
-cargo clippy --workspace --all-targets
+cargo clippy --workspace --all-targets [--features ffmpeg]
+cargo fmt --all -- --check             # CI enforces this and clippy -D warnings, both feature sets
 ```
 
 Run against a phone (USB debugging authorized, Android 12+):
 ```
-./target/release/pc4l --facing back --resolution 3840x2160 --bitrate 30 --device /dev/video10
+./target/release/pc4l --list-sizes
+./target/release/pc4l --facing back --resolution max --bitrate 30 --device /dev/video10
 ```
+
+Testing tips (no `ffmpeg` CLI needed): grab a frame from the loopback with
+`gst-launch-1.0 -q v4l2src device=/dev/video10 num-buffers=1 ! videoconvert ! jpegenc ! filesink location=f.jpg`;
+`RUST_LOG=debug` prints a 5 s throughput report and relays the scrcpy server's own log.
+The phone's camera app must be closed (`adb shell input keyevent KEYCODE_HOME`) or the
+server fails with `CAMERA_IN_USE`.
 
 Exercise the whole V4L2 sink path with **no phone attached**:
 ```
@@ -49,18 +58,25 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
    and launches the server via `app_process`.
 2. **`session.rs`** — the orchestrator and public API (`CameraSession`, `ConnectOptions`,
    `Facing`). `connect()` starts the server with a fixed set of scrcpy options and
-   completes the handshake; `run_to_v4l2()` is the blocking decode→convert→write loop.
+   completes the handshake; `run(sink, stop)` is the blocking decode→convert→write loop
+   (stop flag checked per packet / every 500 ms; `STALL_TIMEOUT` of silence →
+   `Error::StreamStalled`). The server's stdout/stderr is relayed into `log`.
+   **`cameras.rs`** parses the server's `list_camera_sizes=true` report.
 3. **`protocol.rs`** — parses scrcpy's **undocumented** video-socket wire format
    (12-byte codec-meta header, then per-frame 12-byte header + Annex-B payload).
    Reverse-engineered against the pinned server version; unit-tested against
    hand-built fixtures.
-4. **`decode.rs`** — `openh264` (statically linked via `source` feature), Annex-B → I420.
+4. **`decode.rs`** — Annex-B → I420 via `openh264` (statically linked via `source`
+   feature) or, with the `ffmpeg` feature, system libavcodec (`Backend::Ffmpeg`).
 5. **`convert.rs`** — I420 → packed YUYV422.
 6. **`sink.rs`** — `v4l` crate mmap output stream to `/dev/videoN`.
 7. **`loopback.rs`** — auto-loads `v4l2loopback` via `pkexec modprobe` if the device
    node is missing.
 
-`crates/pc4l` is a thin clap CLI over this library.
+`crates/pc4l` is a clap CLI over this library; it owns the policy bits: Ctrl-C/SIGTERM
+handling, the reconnect-with-backoff loop (keeping the V4L2 sink open across sessions),
+`--list-sizes` and `--resolution max`. `contrib/` has boot-time loopback config and a
+systemd user unit.
 
 ### Non-obvious protocol details (hard-won, don't regress)
 
@@ -76,13 +92,21 @@ These are load-bearing and were each the cause of a real failure during bring-up
 
 ### Resolution ceiling
 
-The bundled `openh264` decoder handles up to **3840x2160**. Larger camera modes
-(e.g. 4000x3000) make openh264 reject the SPS (`dsNoParamSets`, native error 16).
-`run_to_v4l2` tolerates transient decode errors but surfaces a clear
-"resolution may exceed openh264" error if nothing decodes at all.
+openh264 hard-codes H.264 level 5.2 (`GetLevelLimits(52)`, 36864 macroblocks) in its SPS
+parser: 3840x2160 and 2992x2992 fit, 4000x3000 does not (`dsNoParamSets`, native
+error 16). `decode::MAX_MACROBLOCKS` / `Backend::fits` encode this so the CLI rejects
+oversized modes up front. The `ffmpeg` feature has no such limit (4000x3000 verified).
+
+Separately, camera sizes that aren't multiples of 8 (4000x2250) fail on the *phone*:
+scrcpy rounds them for the encoder and the camera refuses the rounded size
+(`onConfigureFailed`, stream connects but no packets ever arrive). `cameras::is_usable_size`
+filters these.
+
+libavcodec gotchas in the ffmpeg backend: `avcodec_receive_frame` unrefs its destination
+before returning EAGAIN (so drain into a scratch frame and swap), and an SPS/PPS-only
+packet is "invalid data" (so it is prepended to the next packet, as scrcpy does).
 
 ## Scope
 
-USB ADB only; camera→V4L2 only (no Wi-Fi/TCP ADB, audio, display mirroring, or input
-control). Cross-platform virtual-camera sinks (Windows/macOS) are explicitly out of
+Camera→V4L2 only (no audio, display mirroring, or input control). Cross-platform virtual-camera sinks (Windows/macOS) are explicitly out of
 scope — V4L2 is Linux-only.
