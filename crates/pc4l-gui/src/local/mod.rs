@@ -27,10 +27,13 @@ fn environment() -> Result<Environment> {
         .map_err(|e| anyhow!("initialising ONNX Runtime: {e}"))
 }
 
-/// One model at a time on the runtime. The WebGPU provider shares one Dawn device
-/// between sessions and is not safe to drive from two threads at once: a block
-/// detection overlapping a read segfaulted inside a TopK kernel. Session creation
-/// counts too. Held around every `run` and every load.
+/// One model at a time on the runtime. The WebGPU provider is not safe to `run`
+/// from two threads at once, even on two sessions: a block detection overlapping a
+/// read segfaulted inside a TopK kernel. This is
+/// <https://github.com/microsoft/onnxruntime/issues/32561> (open; a fix is in
+/// progress as PR 29851) -- sequential runs are fine, concurrent ones are a silent
+/// SIGSEGV. Held around every `run` and, to be safe, every load; drop it once the
+/// pinned ONNX Runtime carries the fix.
 pub static RUNTIME: Mutex<()> = Mutex::new(());
 
 /// Takes [`RUNTIME`], surviving a panic elsewhere.

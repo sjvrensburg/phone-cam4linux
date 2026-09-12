@@ -131,7 +131,10 @@ min-area rect gives the quad, as PaddleX does), `local/models.rs` finds or downl
 each model's files (pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR/<name>/`,
 exe-adjacent `models/<name>/`, then `~/.cache/pc4l/models/<name>/`), and
 `local/mod.rs` holds the one process-wide `ort` environment (`ort` refuses a second)
-and wraps GLM-OCR as a `Transcriber` that prepares on a thread. In `app.rs` the crop
+and wraps GLM-OCR as a `Transcriber` that prepares on a thread, plus `RUNTIME`, the
+one lock every session load and run takes: the WebGPU EP segfaults on concurrent
+`run` across sessions (microsoft/onnxruntime#32561, open) -- keep it until the
+pinned runtime has the fix. In `app.rs` the crop
 is a rectangle plus an optional quad (`Selection`); any hand edit of the crop drops
 the quad (`set_rect`) except dragging a quad corner, which moves that corner and
 refits the rectangle. Block mode (`block_mode`) re-runs the detector whenever the
