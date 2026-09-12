@@ -61,6 +61,8 @@ jobs:
 
       - name: Package model
         id: model
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           mkdir -p dist/model/models
           target/release/pc4l-gui --fetch-model dist/model/models

@@ -162,8 +162,16 @@ pub fn download_into(dir: &Path, progress: &dyn Fn(String)) -> Result<()> {
         }
         let url = format!("{REPO_URL}/{}", file.path);
         let part = dir.join(format!("{}.part", file.path));
-        let mut response = agent
-            .get(&url)
+        // Anonymous downloads are rate-limited (CI runners share addresses); a
+        // Hugging Face token lifts that. The files themselves are public.
+        let mut request = agent.get(&url);
+        if let Some(token) = std::env::var_os("HF_TOKEN").filter(|t| !t.is_empty()) {
+            request = request.header(
+                "authorization",
+                format!("Bearer {}", token.to_string_lossy()),
+            );
+        }
+        let mut response = request
             .call()
             .with_context(|| format!("downloading {}", file.path))?;
         let mut reader = response.body_mut().as_reader();

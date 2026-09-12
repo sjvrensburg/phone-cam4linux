@@ -110,13 +110,11 @@ fn convert_rgba(
         let u_row = &frame.u[(sy / 2) * uv_w..];
         let v_row = &frame.v[(sy / 2) * uv_w..];
         let out_row = &mut out[row * out_w * 4..(row + 1) * out_w * 4];
-        for (col, px) in out_row.chunks_exact_mut(4).enumerate() {
+        let (pixels, _) = out_row.as_chunks_mut::<4>();
+        for (col, px) in pixels.iter_mut().enumerate() {
             let sx = x0 + col * step;
             let [r, g, b] = yuv_to_rgb(y_row[sx], u_row[sx / 2], v_row[sx / 2]);
-            px[0] = r;
-            px[1] = g;
-            px[2] = b;
-            px[3] = 255;
+            *px = [r, g, b, 255];
         }
     }
 }
@@ -240,7 +238,7 @@ mod tests {
         let frame = gradient_frame(4, 2);
         let mut out = vec![0u8; 4 * 2 * 4];
         i420_to_rgba(&frame, &mut out);
-        for px in out.chunks_exact(4) {
+        for px in out.as_chunks::<4>().0 {
             assert_eq!(px[3], 255);
             assert_eq!(px[0], px[1]);
             assert_eq!(px[1], px[2]);

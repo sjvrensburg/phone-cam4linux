@@ -72,7 +72,8 @@ bindings), and for the GUI `libxkbcommon` and `libwayland` development files. Th
 build downloads the pinned `scrcpy-server` jar and (for the GUI) prebuilt ONNX Runtime
 binaries; `cargo build --release -p pc4l-gui --no-default-features` skips the latter and
 the built-in model. `pc4l-gui --fetch-model DIR` downloads the model into `DIR/` with
-checksum verification, for machines that will be offline.
+checksum verification, for machines that will be offline (set `HF_TOKEN` to a Hugging
+Face token if anonymous downloads are being rate-limited; the files are public).
 
 ## Usage
 
