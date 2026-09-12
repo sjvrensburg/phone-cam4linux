@@ -127,6 +127,11 @@ pub enum BackendConfig {
         device: LocalDevice,
         #[serde(default = "default_max_tokens")]
         max_tokens: u32,
+        /// Ceiling on image tokens (the image is downscaled to fit). A whole page
+        /// at the model's default budget lost the GPU; 2048 is the workbench's
+        /// measured setting.
+        #[serde(default = "default_max_image_tokens")]
+        max_image_tokens: u32,
     },
 }
 
@@ -155,6 +160,9 @@ fn default_max_tokens() -> u32 {
 }
 fn default_hint_samples() -> u32 {
     3
+}
+fn default_max_image_tokens() -> u32 {
+    2048
 }
 
 impl BackendConfig {
@@ -194,7 +202,13 @@ impl BackendConfig {
                 name,
                 device,
                 max_tokens,
-            } => Box::new(crate::local::LocalBackend::new(name, device, max_tokens)),
+                max_image_tokens,
+            } => Box::new(crate::local::LocalBackend::new(
+                name,
+                device,
+                max_tokens,
+                max_image_tokens,
+            )),
             #[cfg(not(feature = "local-model"))]
             BackendConfig::Local { name, .. } => {
                 log::warn!("backend {name:?} needs a build with the local-model feature");
@@ -258,6 +272,7 @@ impl Default for Config {
                     name: "GLM-OCR (built in)".into(),
                     device: LocalDevice::default(),
                     max_tokens: 1024,
+                    max_image_tokens: 2048,
                 },
                 BackendConfig::HintApi {
                     name: "workbench GLM-OCR".into(),

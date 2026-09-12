@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use image::{imageops::FilterType, RgbImage};
 use ndarray::{Array, ArrayD, IxDyn};
 use ort::ep::{ExecutionProviderDispatch, WebGPU, CPU};
+use ort::memory::{AllocationDevice, AllocatorType, MemoryInfo, MemoryType};
 use ort::session::{Session, SessionInputValue};
 use ort::value::{DynValue, Tensor, TensorElementType, ValueType};
 use std::borrow::Cow;
@@ -121,15 +122,20 @@ struct ImageInputs {
     num_image_tokens: usize,
 }
 
-fn preprocess(img: &RgbImage, pp: &PreprocessorConfig) -> ImageInputs {
+/// `max_image_tokens` caps the pixel budget: one image token per
+/// `(patch * merge)^2` pixels. The model's own default (9.6 MP, ~6000 tokens) is
+/// more than the GPU path survives -- a whole 2992x2992 page lost the Vulkan device
+/// -- and 2048 is what the workbench's llama-server ran with.
+fn preprocess(img: &RgbImage, pp: &PreprocessorConfig, max_image_tokens: usize) -> ImageInputs {
     let factor = (pp.patch_size * pp.merge_size) as u32;
     let t = pp.temporal_patch_size;
+    let token_budget_px = (t * max_image_tokens * (factor as usize).pow(2)) as u32;
     let (rh, rw) = smart_resize(
         img.height(),
         img.width(),
         factor,
         pp.size.shortest_edge,
-        pp.size.longest_edge,
+        pp.size.longest_edge.min(token_budget_px),
         t,
     );
     let resized = image::imageops::resize(img, rw, rh, FilterType::CatmullRom);
@@ -298,12 +304,42 @@ pub struct Model {
     embeds_type: TensorElementType,
     pixel_type: TensorElementType,
     device: Device,
+    max_image_tokens: usize,
+}
+
+/// Where the decoder's KV cache lives between steps: the execution provider's own
+/// memory. (`MemoryInfo` is not `Send`, so it is made per step; it is a tiny handle.)
+fn kv_memory(device: Device) -> Result<MemoryInfo<'static>> {
+    let where_ = match device {
+        Device::WebGpu => AllocationDevice::WEBGPU_BUFFER,
+        Device::Cpu => AllocationDevice::CPU,
+    };
+    Ok(MemoryInfo::new(
+        where_,
+        0,
+        AllocatorType::Device,
+        MemoryType::Default,
+    )?)
+}
+
+fn host_memory() -> Result<MemoryInfo<'static>> {
+    Ok(MemoryInfo::new(
+        AllocationDevice::CPU,
+        0,
+        AllocatorType::Device,
+        MemoryType::Default,
+    )?)
 }
 
 impl Model {
     /// Loads the three graphs from `dir/onnx/*_{variant}.onnx` on `device`. A WebGPU
     /// request fails here (not later) if the provider cannot be registered.
-    pub fn load(dir: &Path, variant: &str, device: Device) -> Result<Self> {
+    pub fn load(
+        dir: &Path,
+        variant: &str,
+        device: Device,
+        max_image_tokens: usize,
+    ) -> Result<Self> {
         let env = ort::init().build()?;
         let providers: Vec<ExecutionProviderDispatch> = match device {
             Device::WebGpu => vec![WebGPU::default().build().error_on_failure()],
@@ -348,6 +384,7 @@ impl Model {
             embeds_type,
             pixel_type,
             device,
+            max_image_tokens: max_image_tokens.max(64),
         })
     }
 
@@ -362,7 +399,7 @@ impl Model {
         max_tokens: usize,
     ) -> Result<Generated> {
         let t0 = Instant::now();
-        let inputs = preprocess(img, &self.pp);
+        let inputs = preprocess(img, &self.pp, self.max_image_tokens);
 
         // Vision encoder.
         let (gt, gh, gw) = inputs.grid_thw;
@@ -422,15 +459,18 @@ impl Model {
         // Prefill, then greedy decode one token at a time.
         let layers = self.cfg.text_config.num_hidden_layers;
         let eos = self.cfg.text_config.eos_token_id.clone();
-        let mut kv: Vec<ArrayD<f32>> = vec![
-            Array::zeros(IxDyn(&[
-                1,
-                self.cfg.text_config.num_key_value_heads,
-                0,
-                self.cfg.text_config.head_dim
-            ]));
-            2 * layers
-        ];
+        let empty = || -> Result<DynValue> {
+            float_value(
+                Array::zeros(IxDyn(&[
+                    1,
+                    self.cfg.text_config.num_key_value_heads,
+                    0,
+                    self.cfg.text_config.head_dim,
+                ])),
+                self.kv_type,
+            )
+        };
+        let mut kv: Vec<DynValue> = (0..2 * layers).map(|_| empty()).collect::<Result<_>>()?;
         let mut past = 0usize;
         let (mut next, new_kv) = self.step(&embeds, &pos, past, &kv)?;
         kv = new_kv;
@@ -490,40 +530,43 @@ impl Model {
 
     /// One decoder call over `embeds` (1, T, hidden) with `past` cached positions.
     /// Returns the argmax token of the last position and the grown KV cache.
+    ///
+    /// The cache stays where the execution provider put it: outputs are bound to
+    /// device memory and handed back as the next step's inputs, so a decode step
+    /// moves only the new token in and the last logits out. Round-tripping the whole
+    /// cache through host memory cost ~150 MB per token at page-sized contexts.
     fn step(
         &mut self,
         embeds: &ArrayD<f32>,
         pos: &ArrayD<i64>,
         past: usize,
-        kv: &[ArrayD<f32>],
-    ) -> Result<(u32, Vec<ArrayD<f32>>)> {
+        kv: &[DynValue],
+    ) -> Result<(u32, Vec<DynValue>)> {
         let t = embeds.shape()[1];
         let mask: ArrayD<i64> = Array::ones(IxDyn(&[1, past + t]));
-        let mut inputs = vec![
-            input(
-                "inputs_embeds",
-                float_value(embeds.clone(), self.embeds_type)?,
-            ),
-            input("attention_mask", Tensor::from_array(mask)?.into_dyn()),
-            input("position_ids", Tensor::from_array(pos.clone())?.into_dyn()),
-            // Only the last position's logits are wanted (scalar int64).
-            input(
-                "num_logits_to_keep",
-                Tensor::from_array(Array::from_elem(IxDyn(&[]), 1i64))?.into_dyn(),
-            ),
-        ];
+        let embeds = float_value(embeds.clone(), self.embeds_type)?;
+        let mask = Tensor::from_array(mask)?.into_dyn();
+        let pos = Tensor::from_array(pos.clone())?.into_dyn();
+        // Only the last position's logits are wanted (scalar int64).
+        let keep = Tensor::from_array(Array::from_elem(IxDyn(&[]), 1i64))?.into_dyn();
+
         let layers = self.cfg.text_config.num_hidden_layers;
+        let mut binding = self.decoder.create_binding()?;
+        binding.bind_input("inputs_embeds", &embeds)?;
+        binding.bind_input("attention_mask", &mask)?;
+        binding.bind_input("position_ids", &pos)?;
+        binding.bind_input("num_logits_to_keep", &keep)?;
         for l in 0..layers {
-            inputs.push(input(
-                format!("past_key_values.{l}.key"),
-                float_value(kv[2 * l].clone(), self.kv_type)?,
-            ));
-            inputs.push(input(
-                format!("past_key_values.{l}.value"),
-                float_value(kv[2 * l + 1].clone(), self.kv_type)?,
-            ));
+            binding.bind_input(format!("past_key_values.{l}.key"), &kv[2 * l])?;
+            binding.bind_input(format!("past_key_values.{l}.value"), &kv[2 * l + 1])?;
         }
-        let out = self.decoder.run(inputs)?;
+        let (host, device) = (host_memory()?, kv_memory(self.device)?);
+        binding.bind_output_to_device("logits", &host)?;
+        for l in 0..layers {
+            binding.bind_output_to_device(format!("present.{l}.key"), &device)?;
+            binding.bind_output_to_device(format!("present.{l}.value"), &device)?;
+        }
+        let mut out = self.decoder.run_binding(&binding)?;
         let logits = extract_f32(&out["logits"])?;
         let last = logits.index_axis(ndarray::Axis(1), logits.shape()[1] - 1);
         let last = last.index_axis(ndarray::Axis(0), 0);
@@ -539,8 +582,13 @@ impl Model {
             });
         let mut new_kv = Vec::with_capacity(2 * layers);
         for l in 0..layers {
-            new_kv.push(extract_f32(&out[format!("present.{l}.key")])?);
-            new_kv.push(extract_f32(&out[format!("present.{l}.value")])?);
+            for part in ["key", "value"] {
+                let name = format!("present.{l}.{part}");
+                new_kv.push(
+                    out.remove(&name)
+                        .ok_or_else(|| anyhow!("decoder produced no {name}"))?,
+                );
+            }
         }
         Ok((tok as u32, new_kv))
     }

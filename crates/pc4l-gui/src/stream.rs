@@ -11,7 +11,7 @@ use phone_cam4linux::{
 };
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -60,9 +60,18 @@ pub struct Shared {
     cameras: Mutex<Vec<CameraInfo>>,
     /// The live session's control channel, while one is up.
     control: Mutex<Option<CameraControl>>,
-    /// Where we believe the phone's zoom is, in [`ZOOM_STEP`] steps from 1.0: the
-    /// control channel only moves relatively and the phone never reports back.
-    zoom_steps: Mutex<i32>,
+    /// Zoom in [`ZOOM_STEP`] steps from 1.0: where the phone is believed to be (the
+    /// control channel only moves relatively and the phone never reports back) and
+    /// where the user wants it. A dedicated thread walks `applied` towards `target`
+    /// one message at a time, so a fast slider drag queues one step, not fifty.
+    zoom: Mutex<ZoomState>,
+    zoom_changed: Condvar,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ZoomState {
+    applied: i32,
+    target: i32,
 }
 
 /// The zoom grid position the server snaps `ratio` to.
@@ -104,34 +113,69 @@ impl Shared {
             .cloned()
     }
 
-    /// The zoom ratio as currently applied (or requested for the next connection).
+    /// The zoom ratio the user asked for (what a slider should show).
     pub fn zoom(&self) -> f32 {
-        steps_to_zoom(*self.zoom_steps.lock().unwrap())
+        steps_to_zoom(self.zoom.lock().unwrap().target)
     }
 
-    /// Moves the camera zoom to `zoom`: live over the control channel when a session
-    /// is up (the phone snaps to its x1.0625 grid and clamps to its range), and
-    /// remembered for the next connection either way.
+    /// The zoom ratio the phone is believed to be at right now.
+    pub fn zoom_applied(&self) -> f32 {
+        steps_to_zoom(self.zoom.lock().unwrap().applied)
+    }
+
+    /// Asks for the camera zoom `zoom` (snapped to the phone's x1.0625 grid; the
+    /// phone clamps to its range). Applied live by the zoom thread when a session is
+    /// up, and remembered for the next connection either way.
     pub fn set_zoom(&self, zoom: f32) {
         let target = zoom_to_steps(zoom);
-        let mut steps = self.zoom_steps.lock().unwrap();
-        let control = self.control.lock().unwrap().clone();
-        match control {
-            Some(control) => {
-                let result = if target > *steps {
-                    (*steps..target).try_for_each(|_| control.zoom_in())
-                } else {
-                    (target..*steps).try_for_each(|_| control.zoom_out())
-                };
-                match result {
-                    Ok(()) => *steps = target,
-                    Err(e) => log::warn!("zoom over the control channel failed: {e}"),
+        let mut state = self.zoom.lock().unwrap();
+        if state.target != target {
+            state.target = target;
+            let ratio = steps_to_zoom(target);
+            self.config.lock().unwrap().options.zoom = (ratio > 1.0).then_some(ratio);
+            self.zoom_changed.notify_all();
+        }
+    }
+
+    /// One grid step in (`+1`) or out (`-1`) from the current target.
+    pub fn step_zoom(&self, steps: i32) {
+        let target = self.zoom.lock().unwrap().target + steps;
+        self.set_zoom(steps_to_zoom(target.max(0)));
+    }
+
+    /// The zoom thread: walk the applied zoom towards the target, one control message
+    /// at a time, waiting when there is nothing to do.
+    fn run_zoom(&self) {
+        let mut state = self.zoom.lock().unwrap();
+        while !self.stop.load(Ordering::Relaxed) {
+            if state.applied == state.target {
+                state = self
+                    .zoom_changed
+                    .wait_timeout(state, Duration::from_millis(250))
+                    .unwrap()
+                    .0;
+                continue;
+            }
+            let control = self.control.lock().unwrap().clone();
+            let Some(control) = control else {
+                // No session: it will start at the target (see run_session).
+                state.applied = state.target;
+                continue;
+            };
+            let dir = (state.target - state.applied).signum();
+            let sent = if dir > 0 {
+                control.zoom_in()
+            } else {
+                control.zoom_out()
+            };
+            match sent {
+                Ok(()) => state.applied += dir,
+                Err(e) => {
+                    log::warn!("zoom over the control channel failed: {e}");
+                    state.applied = state.target;
                 }
             }
-            None => *steps = target,
         }
-        let applied = steps_to_zoom(*steps);
-        self.config.lock().unwrap().options.zoom = (applied > 1.0).then_some(applied);
     }
 
     pub fn torch(&self) -> bool {
@@ -186,10 +230,22 @@ impl Worker {
             config: Mutex::new(config),
             cameras: Mutex::new(Vec::new()),
             control: Mutex::new(None),
-            zoom_steps: Mutex::new(0),
+            zoom: Mutex::new(ZoomState {
+                applied: 0,
+                target: 0,
+            }),
+            zoom_changed: Condvar::new(),
         });
-        *shared.zoom_steps.lock().unwrap() =
-            zoom_to_steps(shared.config.lock().unwrap().options.zoom.unwrap_or(1.0));
+        let start = zoom_to_steps(shared.config.lock().unwrap().options.zoom.unwrap_or(1.0));
+        *shared.zoom.lock().unwrap() = ZoomState {
+            applied: start,
+            target: start,
+        };
+        let zoom_shared = Arc::clone(&shared);
+        std::thread::Builder::new()
+            .name("pc4l-zoom".into())
+            .spawn(move || zoom_shared.run_zoom())
+            .expect("spawning zoom thread");
         let thread_shared = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
             .name("pc4l-stream".into())
@@ -205,6 +261,7 @@ impl Worker {
     /// and removes the adb forward).
     pub fn stop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
+        self.shared.zoom_changed.notify_all();
         if let Some(h) = self.handle.take() {
             let _ = h.join();
         }
@@ -309,9 +366,11 @@ fn run_session(
         .context("connecting to phone camera")?;
     let (w, h) = (session.meta.width, session.meta.height);
     log::info!("streaming {w}x{h}");
-    // The phone starts this session at the configured zoom (snapped to its grid).
-    *shared.zoom_steps.lock().unwrap() = zoom_to_steps(config.options.zoom.unwrap_or(1.0));
+    // The phone starts this session at the configured zoom (snapped to its grid);
+    // anything asked for since is caught up by the zoom thread.
+    shared.zoom.lock().unwrap().applied = zoom_to_steps(config.options.zoom.unwrap_or(1.0));
     *shared.control.lock().unwrap() = session.control();
+    shared.zoom_changed.notify_all();
 
     if let Some(path) = &config.tee_device {
         if tee.as_ref().is_some_and(|s| s.size() != (w, h)) {

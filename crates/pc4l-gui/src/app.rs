@@ -61,6 +61,31 @@ impl Crop {
         (w >= MIN_CROP_PX && h >= MIN_CROP_PX).then_some(Self { x, y, w, h })
     }
 
+    /// Shifted by (`dx`, `dy`) and kept inside a `width`x`height` space.
+    fn moved(self, dx: i64, dy: i64, width: usize, height: usize) -> Self {
+        let x = (self.x as i64 + dx).clamp(0, (width - self.w) as i64) as usize;
+        let y = (self.y as i64 + dy).clamp(0, (height - self.h) as i64) as usize;
+        Self { x, y, ..self }
+    }
+
+    /// Scaled by `factor` about its centre, clamped to the space and to
+    /// [`MIN_CROP_PX`]: the digital zoom in and out.
+    fn scaled(self, factor: f32, width: usize, height: usize) -> Self {
+        let (cx, cy) = (
+            self.x as f32 + self.w as f32 / 2.0,
+            self.y as f32 + self.h as f32 / 2.0,
+        );
+        let w = ((self.w as f32 * factor).round() as usize).clamp(MIN_CROP_PX, width);
+        let h = ((self.h as f32 * factor).round() as usize).clamp(MIN_CROP_PX, height);
+        let x = ((cx - w as f32 / 2.0).round().max(0.0) as usize).min(width - w);
+        let y = ((cy - h as f32 / 2.0).round().max(0.0) as usize).min(height - h);
+        Self { x, y, w, h }
+    }
+
+    fn contains(self, x: usize, y: usize) -> bool {
+        x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
+    }
+
     /// Maps a rectangle in view space (the source frame turned by `rotation`, so
     /// `view_w`x`view_h` pixels) back to the source frame.
     fn to_source(self, rotation: Rotation, view_w: usize, view_h: usize) -> Self {
@@ -87,6 +112,28 @@ impl Crop {
             },
         }
     }
+}
+
+/// Turns smoothed scroll deltas into whole wheel notches (positive = up/away).
+fn wheel_notches(accum: &mut f32, delta: f32) -> i32 {
+    const NOTCH: f32 = 40.0;
+    *accum += delta;
+    let notches = (*accum / NOTCH).trunc();
+    *accum -= notches * NOTCH;
+    notches as i32
+}
+
+/// A drag in progress on the preview.
+#[derive(Debug, Clone, Copy)]
+enum Drag {
+    Draw {
+        origin: (usize, usize),
+    },
+    Move {
+        /// Where the drag began, and the box as it was then.
+        last: (usize, usize),
+        box_at_start: Crop,
+    },
 }
 
 /// Fetches a view-space region of `frame` as rotated RGBA, every `step`-th pixel.
@@ -157,7 +204,10 @@ pub struct App {
     rotation: Rotation,
     /// In view space.
     crop: Option<Crop>,
-    drag_origin: Option<(usize, usize)>,
+    drag: Option<Drag>,
+    /// Scroll accumulators (egui smooths wheel input over frames).
+    wheel_preview: f32,
+    wheel_crop: f32,
     save_dir: PathBuf,
     message: Option<(String, Instant)>,
     fps: FpsCounter,
@@ -197,7 +247,9 @@ impl App {
             captured: None,
             rotation: Rotation::None,
             crop: None,
-            drag_origin: None,
+            drag: None,
+            wheel_preview: 0.0,
+            wheel_crop: 0.0,
             save_dir,
             message: None,
             fps: FpsCounter::default(),
@@ -439,6 +491,13 @@ impl App {
             if slider.changed() {
                 self.shared().set_zoom(value);
             }
+            if ui
+                .button("1x  [0]")
+                .on_hover_text("reset the phone's zoom")
+                .clicked()
+            {
+                self.shared().set_zoom(1.0);
+            }
         }
         let mut torch = self.shared().torch();
         if ui.checkbox(&mut torch, "Torch").changed() {
@@ -468,6 +527,15 @@ impl App {
             if self.rotation != Rotation::None {
                 ui.separator();
                 ui.label(format!("rotated {:?}", self.rotation));
+            }
+            let (want, have) = (self.shared().zoom(), self.shared().zoom_applied());
+            if want > 1.0 || have > 1.0 {
+                ui.separator();
+                if (want - have).abs() > 0.01 {
+                    ui.label(format!("zoom {have:.2}x → {want:.2}x"));
+                } else {
+                    ui.label(format!("zoom {have:.2}x"));
+                }
             }
             if self.captured.is_some() {
                 ui.separator();
@@ -519,15 +587,42 @@ impl App {
         };
 
         if response.drag_started() {
-            self.drag_origin = response.interact_pointer_pos().map(to_view);
+            if let Some(start) = response.interact_pointer_pos().map(to_view) {
+                // Inside the box: pan it. Outside: draw a new one.
+                self.drag = Some(match self.crop {
+                    Some(c) if c.contains(start.0, start.1) => Drag::Move {
+                        last: start,
+                        box_at_start: c,
+                    },
+                    _ => Drag::Draw { origin: start },
+                });
+            }
         }
-        if let (Some(origin), Some(pos)) = (self.drag_origin, response.interact_pointer_pos()) {
+        if let (Some(drag), Some(pos)) = (self.drag, response.interact_pointer_pos()) {
             if response.dragged() || response.drag_stopped() {
-                self.crop = Crop::from_corners(origin, to_view(pos)).clamped(vw, vh);
+                let here = to_view(pos);
+                match drag {
+                    Drag::Draw { origin } => {
+                        self.crop = Crop::from_corners(origin, here).clamped(vw, vh);
+                    }
+                    Drag::Move { last, box_at_start } => {
+                        let (dx, dy) =
+                            (here.0 as i64 - last.0 as i64, here.1 as i64 - last.1 as i64);
+                        self.crop = Some(box_at_start.moved(dx, dy, vw, vh));
+                    }
+                }
             }
         }
         if response.drag_stopped() {
-            self.drag_origin = None;
+            self.drag = None;
+        }
+        // Wheel over the preview: the phone's zoom, one grid step per notch.
+        if response.hovered() {
+            let delta = ui.input(|i| i.smooth_scroll_delta.y);
+            let notches = wheel_notches(&mut self.wheel_preview, delta);
+            if notches != 0 {
+                self.shared().step_zoom(notches);
+            }
         }
 
         if let Some(crop) = self.crop {
@@ -585,6 +680,11 @@ impl App {
                 ui.add_space(24.0);
                 ui.label("Drag a box on the preview to zoom to a region.");
                 ui.label(
+                    "Drag inside the box or use the arrow keys to move it; [ and ] or the \
+                     wheel over this panel resize it. The wheel over the preview, + / - \
+                     and 0 drive the phone's own zoom.",
+                );
+                ui.label(
                     "Capture freezes the frame; Save writes the box (or the whole frame) \
                      as a PNG at full resolution; Read it sends it to the model.",
                 );
@@ -612,9 +712,25 @@ impl App {
         let avail = ui.available_size();
         let scale = (avail.x / crop.w as f32).min(avail.y / crop.h as f32);
         let size = Vec2::new(crop.w as f32 * scale, crop.h as f32 * scale);
-        ui.centered_and_justified(|ui| {
-            ui.add(egui::Image::from_texture(texture).fit_to_exact_size(size));
-        });
+        let response = ui
+            .centered_and_justified(|ui| {
+                ui.add(
+                    egui::Image::from_texture(texture)
+                        .fit_to_exact_size(size)
+                        .sense(Sense::hover()),
+                )
+            })
+            .inner;
+        // Wheel over the zoomed view: grow or shrink the box about its centre.
+        if response.hovered() {
+            let delta = ui.input(|i| i.smooth_scroll_delta.y);
+            let notches = wheel_notches(&mut self.wheel_crop, delta);
+            if notches != 0 {
+                let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
+                let factor = 1.1f32.powi(-notches);
+                self.crop = Some(crop.scaled(factor, vw, vh));
+            }
+        }
     }
 
     /// Backend picker, the Read button, and the readings so far.
@@ -684,6 +800,51 @@ impl App {
                 i.key_pressed(Key::Enter),
             )
         });
+        // Phone zoom: + / - step, 0 resets.
+        let (zoom_in, zoom_out, zoom_reset) = ctx.input(|i| {
+            (
+                i.key_pressed(Key::Plus) || i.key_pressed(Key::Equals),
+                i.key_pressed(Key::Minus),
+                i.key_pressed(Key::Num0),
+            )
+        });
+        if zoom_in {
+            self.shared().step_zoom(2);
+        }
+        if zoom_out {
+            self.shared().step_zoom(-2);
+        }
+        if zoom_reset {
+            self.shared().set_zoom(1.0);
+        }
+        // Digital box: [ / ] shrink and grow, arrows pan (shift: finer).
+        if let (Some(crop), Some((vw, vh))) = (self.crop, self.crop_space) {
+            let (grow, shrink, dx, dy, fine) = ctx.input(|i| {
+                (
+                    i.key_pressed(Key::CloseBracket),
+                    i.key_pressed(Key::OpenBracket),
+                    i32::from(i.key_pressed(Key::ArrowRight))
+                        - i32::from(i.key_pressed(Key::ArrowLeft)),
+                    i32::from(i.key_pressed(Key::ArrowDown))
+                        - i32::from(i.key_pressed(Key::ArrowUp)),
+                    i.modifiers.shift,
+                )
+            });
+            if grow {
+                self.crop = Some(crop.scaled(1.25, vw, vh));
+            }
+            if shrink {
+                self.crop = Some(crop.scaled(0.8, vw, vh));
+            }
+            if dx != 0 || dy != 0 {
+                let unit = if fine {
+                    1
+                } else {
+                    (crop.w.min(crop.h) / 5).max(1)
+                } as i64;
+                self.crop = Some(crop.moved(dx as i64 * unit, dy as i64 * unit, vw, vh));
+            }
+        }
         if space {
             self.capture();
         }
@@ -691,7 +852,12 @@ impl App {
             self.read();
         }
         if esc {
-            self.crop = None;
+            // Back out one level: the box first, then the capture.
+            if self.crop.is_some() {
+                self.crop = None;
+            } else if self.captured.is_some() {
+                self.capture();
+            }
         }
         if save {
             self.save();

@@ -121,8 +121,11 @@ if none has them, they are downloaded there on first run from a pinned Hugging F
 revision, each file verified against a sha256 compiled into the app, with progress
 shown in the window. Reads are refused until the model is ready.
 
-Keys: `space` capture/retake, `enter` read, `esc` clear the region, `R`/`shift+R`
-rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`). `--resolution` defaults to
+Keys: `space` capture/retake, `enter` read, `esc` clear the region (then retake),
+`R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`).
+Phone zoom: the slider, the wheel over the preview, `+`/`-`, `0` to reset. The
+region: drag inside it to move it, arrow keys to nudge (`shift` for one pixel),
+`[`/`]` or the wheel over the zoomed view to shrink/grow it. `--resolution` defaults to
 `max`; `--facing`, `--connect`, `--serial`, `--bitrate`, `--fps` and `--decoder`
 are as for `pc4l`. It reconnects with backoff like the CLI.
 

@@ -221,7 +221,7 @@ pub struct LocalBackend {
 }
 
 impl LocalBackend {
-    pub fn new(name: String, device: DevicePref, max_tokens: u32) -> Self {
+    pub fn new(name: String, device: DevicePref, max_tokens: u32, max_image_tokens: u32) -> Self {
         let state = Arc::new(Mutex::new(State::Preparing("locating model".into())));
         let worker_state = Arc::clone(&state);
         std::thread::Builder::new()
@@ -230,7 +230,8 @@ impl LocalBackend {
                 let set = |s: String| {
                     *worker_state.lock().unwrap() = State::Preparing(s);
                 };
-                let result = ensure_model(&set).and_then(|dir| load(&dir, device, &set));
+                let result = ensure_model(&set)
+                    .and_then(|dir| load(&dir, device, max_image_tokens as usize, &set));
                 *worker_state.lock().unwrap() = match result {
                     Ok(model) => {
                         log::info!("GLM-OCR ready on {}", model.device().name());
@@ -251,7 +252,12 @@ impl LocalBackend {
     }
 }
 
-fn load(dir: &Path, device: DevicePref, progress: &dyn Fn(String)) -> Result<Model> {
+fn load(
+    dir: &Path,
+    device: DevicePref,
+    max_image_tokens: usize,
+    progress: &dyn Fn(String),
+) -> Result<Model> {
     let attempts: &[Device] = match device {
         DevicePref::Auto => &[Device::WebGpu, Device::Cpu],
         DevicePref::Webgpu => &[Device::WebGpu],
@@ -260,7 +266,7 @@ fn load(dir: &Path, device: DevicePref, progress: &dyn Fn(String)) -> Result<Mod
     let mut last = None;
     for &d in attempts {
         progress(format!("loading model on {}", d.name()));
-        match Model::load(dir, VARIANT, d) {
+        match Model::load(dir, VARIANT, d, max_image_tokens) {
             Ok(m) => return Ok(m),
             Err(e) => {
                 log::warn!("GLM-OCR on {}: {e:#}", d.name());
