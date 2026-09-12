@@ -106,6 +106,19 @@ impl Crop {
         self.w * self.h
     }
 
+    /// Intersection over union with `other`: how much the same box they are.
+    fn iou(self, other: Self) -> f32 {
+        let x0 = self.x.max(other.x);
+        let y0 = self.y.max(other.y);
+        let x1 = (self.x + self.w).min(other.x + other.w);
+        let y1 = (self.y + self.h).min(other.y + other.h);
+        if x1 <= x0 || y1 <= y0 {
+            return 0.0;
+        }
+        let inter = ((x1 - x0) * (y1 - y0)) as f32;
+        inter / ((self.area() + other.area()) as f32 - inter)
+    }
+
     /// Maps a rectangle in view space (the source frame turned by `rotation`, so
     /// `view_w`x`view_h` pixels) back to the source frame.
     fn to_source(self, rotation: Rotation, view_w: usize, view_h: usize) -> Self {
@@ -677,8 +690,8 @@ impl App {
                                 elapsed.as_secs_f32()
                             ));
                         }
+                        self.follow_selection(&blocks);
                         self.blocks = blocks;
-                        self.selected_block = None;
                     }
                     Err(e) => {
                         // Live mode would repeat the failure every tick.
@@ -782,6 +795,33 @@ impl App {
             .expect("spawning detection thread");
         self.pending_detect = Some((rx, Instant::now()));
         self.last_detect = Some(Instant::now());
+    }
+
+    /// Carries the selected block over to a fresh detection: the new block that
+    /// overlaps it most keeps the selection (so tab goes on from there), and if the
+    /// crop was still exactly that block, the crop follows it.
+    fn follow_selection(&mut self, new: &[Block]) {
+        let Some(old) = self.selected_block.and_then(|i| self.blocks.get(i)) else {
+            self.selected_block = None;
+            return;
+        };
+        let untouched = self.crop == Some(old.rect) && self.quad == old.quad;
+        let best = new
+            .iter()
+            .enumerate()
+            .map(|(j, b)| (j, old.rect.iou(b.rect)))
+            .filter(|(_, iou)| *iou > 0.3)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        match best {
+            Some((j, _)) => {
+                self.selected_block = Some(j);
+                if untouched {
+                    self.crop = Some(new[j].rect);
+                    self.quad = new[j].quad;
+                }
+            }
+            None => self.selected_block = None,
+        }
     }
 
     /// Blocks stay until the next detection replaces them, unless the view they
@@ -1753,6 +1793,25 @@ mod tests {
         // Counter-clockwise: bottom-left.
         let (v, w, _) = render_region(&f, Rotation::Cw270, Crop::whole(4, 6), 1);
         assert_eq!(at(&v, w, 0, 5), src_top_left);
+    }
+
+    #[test]
+    fn iou_is_overlap_over_union() {
+        let a = Crop {
+            x: 0,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        let b = Crop {
+            x: 5,
+            y: 0,
+            w: 10,
+            h: 10,
+        };
+        assert!((a.iou(a) - 1.0).abs() < 1e-6);
+        assert!((a.iou(b) - 50.0 / 150.0).abs() < 1e-6);
+        assert_eq!(a.iou(Crop { x: 20, ..a }), 0.0);
     }
 
     #[test]
