@@ -67,5 +67,5 @@ jobs:
       - name: Test
         run: cargo test --workspace ${{ matrix.args }}
 
-      - name: Build release CLI
-        run: cargo build --release -p pc4l ${{ matrix.args }}
+      - name: Build release binaries
+        run: cargo build --release -p pc4l -p pc4l-gui ${{ matrix.args }}

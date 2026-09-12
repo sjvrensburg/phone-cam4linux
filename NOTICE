@@ -1,0 +1,61 @@
+phone-cam4linux
+Copyright 2026 Stefan Janse van Rensburg
+
+Licensed under the Apache License, Version 2.0 (see LICENSE).
+
+This project builds on, embeds, downloads, or links the following third-party
+work. Rust crate dependencies are listed in Cargo.lock with their own licenses
+(all permissive: MIT, Apache-2.0, BSD, Zlib, ISC, MPL-2.0); the components below
+are the ones that are not ordinary crate dependencies or that deserve a note.
+
+scrcpy-server (https://github.com/Genymobile/scrcpy)
+  Copyright Genymobile and contributors. Apache License 2.0.
+  The upstream-built scrcpy-server jar is downloaded at build time
+  (phone-cam4linux/build.rs, SHA-256 pinned), embedded in the binaries, and pushed
+  to the phone at run time. It is not modified. The video-socket and
+  control-socket wire formats implemented in phone-cam4linux/src were derived by
+  reading its source.
+
+OpenH264 (https://github.com/cisco/openh264)
+  Copyright Cisco Systems, Inc. BSD 2-Clause License.
+  Compiled from source through the `openh264` crate (feature `source`) and linked
+  statically. Note: Cisco's royalty coverage for H.264 applies only to the binary
+  releases Cisco distributes, not to builds from source; H.264 licensing in your
+  jurisdiction is your responsibility.
+
+FFmpeg (optional, `--features ffmpeg`) (https://ffmpeg.org)
+  LGPL-2.1-or-later / GPL-2.0-or-later depending on how your system copy was
+  built. Linked dynamically from the system only when the feature is enabled;
+  nothing from FFmpeg is distributed with this project.
+
+ONNX Runtime (https://github.com/microsoft/onnxruntime)
+  Copyright Microsoft Corporation. MIT License.
+  Used by pc4l-gui's built-in transcription model (feature `local-model`, on by
+  default) through the `ort` crate (MIT/Apache-2.0), which downloads prebuilt
+  ONNX Runtime binaries from pyke.io at build time (https://github.com/pykeio/ort).
+
+Dawn (https://dawn.googlesource.com/dawn)
+  Copyright The Dawn & Tint Authors. BSD 3-Clause License.
+  ONNX Runtime's WebGPU execution provider; shipped as libwebgpu_dawn.so next to
+  pc4l-gui in the release archives.
+
+GLM-OCR (https://huggingface.co/zai-org/GLM-OCR)
+  Copyright Zhipu AI (Z.ai). MIT License.
+  ONNX export: https://huggingface.co/onnx-community/GLM-OCR-ONNX (MIT License).
+  Not included in the binaries: downloaded on first use into the user's cache
+  (SHA-256 verified against the manifest in crates/pc4l-gui/src/local/mod.rs) or
+  shipped as a separate release archive.
+
+oar-ocr (https://github.com/GreatV/oar-ocr)
+  Copyright Wang Xin and contributors. Apache License 2.0.
+  The GLM-OCR image preprocessing ("smart resize" and patch ordering) and the
+  MRoPE position-id construction in crates/pc4l-gui/src/local/glmocr.rs are
+  ported from its oar-ocr-vl crate.
+
+egui / eframe (https://github.com/emilk/egui)
+  Copyright Emil Ernerfeldt. MIT License or Apache License 2.0.
+
+v4l2loopback (https://github.com/umlaeute/v4l2loopback)
+  GNU General Public License v2.0. A kernel module the user installs separately;
+  this project talks to it through the V4L2 device interface only and neither
+  links nor distributes it. contrib/ carries configuration snippets for it.

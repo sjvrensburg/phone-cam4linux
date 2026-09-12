@@ -70,6 +70,14 @@ struct Args {
     #[arg(long, hide = true, value_name = "X,Y,W,H")]
     dev_crop: Option<String>,
 
+    /// Download the built-in transcription model into DIR/<model name>/ (verified
+    /// against the checksums compiled into this binary) and exit. For packaging, or
+    /// for a machine that is offline later: a `models/` directory next to the
+    /// executable is used without any download.
+    #[cfg(feature = "local-model")]
+    #[arg(long, value_name = "DIR")]
+    fetch_model: Option<PathBuf>,
+
     /// Where captures are saved. Defaults to ~/Pictures/pc4l.
     #[arg(long)]
     save_dir: Option<PathBuf>,
@@ -129,6 +137,14 @@ impl From<DecoderArg> for Backend {
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
+
+    #[cfg(feature = "local-model")]
+    if let Some(dir) = &args.fetch_model {
+        let target = dir.join(local::model_dir_name());
+        local::download_into(&target, &|s| eprintln!("{s}"))?;
+        println!("{}", target.display());
+        return Ok(());
+    }
 
     let decoder = Backend::from(args.decoder);
     let resolution = match args.resolution.as_str() {

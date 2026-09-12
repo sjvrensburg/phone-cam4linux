@@ -1,7 +1,18 @@
 # phone-cam4linux
 
-Stream an Android phone's camera to a Linux V4L2 (`/dev/videoN`) device, as a Rust
-library + CLI, without shelling out to the full `scrcpy` client.
+[![CI](https://github.com/sjvrensburg/phone-cam4linux/actions/workflows/ci.yml/badge.svg)](https://github.com/sjvrensburg/phone-cam4linux/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+
+Use an Android phone as a camera on Linux, without the full `scrcpy` client:
+
+- **`pc4l`** -- a CLI that streams the phone's camera into a V4L2 (`/dev/videoN`)
+  device, so browsers, OBS and any webcam app can use it.
+- **`pc4l-gui`** -- a desktop document-camera window: live view, the phone's own zoom,
+  a drag-to-zoom region, capture, save, and handwriting transcription with a built-in
+  model (GLM-OCR on your GPU) or any OpenAI-compatible vision endpoint.
+- **`phone-cam4linux`** -- the Rust library both are built on.
+
+Linux only (V4L2 is Linux; the GUI is Linux-first). Android 12+ on the phone.
 
 ## How it works
 
@@ -39,10 +50,33 @@ mirroring, audio, or input control.
   *full* FFmpeg (on Fedora that's RPM Fusion's `ffmpeg-devel`; `ffmpeg-free` lacks the
   native `h264` decoder).
 
-## Usage
+## Install
+
+**Release archive** (x86_64 Linux, needs a CPU with AVX2 for the built-in model's ONNX
+Runtime): download `pc4l-<version>-x86_64-linux.tar.gz` from the
+[releases page](https://github.com/sjvrensburg/phone-cam4linux/releases) and extract
+it anywhere; it contains `pc4l`, `pc4l-gui`, the `libwebgpu_dawn.so` the GUI's GPU path
+needs (found next to the binary), and `contrib/`. The built-in transcription model
+(~650 MB) is fetched on first use, or extract `pc4l-model-glm-ocr-onnx-q4f16.tar.gz`
+from the same release into the same directory to have it offline
+(`models/` beside the binaries). `SHA256SUMS.txt` covers both archives.
+
+**From source**:
 
 ```
 cargo build --release                      # or: cargo build --release --features ffmpeg
+```
+
+needs a Rust toolchain, `nasm` (OpenH264 assembly), `libclang` (bindgen for the V4L2
+bindings), and for the GUI `libxkbcommon` and `libwayland` development files. The first
+build downloads the pinned `scrcpy-server` jar and (for the GUI) prebuilt ONNX Runtime
+binaries; `cargo build --release -p pc4l-gui --no-default-features` skips the latter and
+the built-in model. `pc4l-gui --fetch-model DIR` downloads the model into `DIR/` with
+checksum verification, for machines that will be offline.
+
+## Usage
+
+```
 ./target/release/pc4l --list-sizes         # see what the phone offers
 ./target/release/pc4l --facing back --resolution max --bitrate 30 --device /dev/video10
 ```
@@ -166,7 +200,12 @@ exercises the loopback/format-negotiation/write path independently of ADB/hardwa
 ## Status / caveats
 
 - Verified end-to-end against a real device (Samsung SM-A307FN running Android 13
-  via crDroid) at 1920x1080, 2992x2992 (openh264) and 4000x3000 (ffmpeg).
+  via crDroid) at 1920x1080, 2992x2992 (openh264) and 4000x3000 (ffmpeg), including
+  the GUI, live zoom/torch, and the built-in model on a Radeon 8060S (RADV) via WebGPU.
+- The GUI's built-in model runs on WebGPU (Vulkan on Linux), an execution provider ONNX
+  Runtime still calls experimental; it falls back to the CPU if the provider cannot be
+  set up, but a GPU driver fault mid-inference takes the process down. Images are
+  capped at 2048 image tokens for that reason.
 - **Protocol pinning**: `src/protocol.rs` implements scrcpy's undocumented
   video-socket wire format, reverse-engineered against the pinned server version in
   `build.rs` (`SCRCPY_VERSION`). Re-verify this module if you bump `SCRCPY_VERSION`.
@@ -175,3 +214,11 @@ exercises the loopback/format-negotiation/write path independently of ADB/hardwa
 - No audio, display mirroring, or input control -- camera-to-V4L2 only.
 - Decode ceiling is openh264's unless built with `--features ffmpeg`; see
   "resolution ceiling" above.
+
+## License
+
+Apache-2.0 (see `LICENSE`). `NOTICE` lists the third-party components this project
+embeds, downloads or links -- notably the upstream `scrcpy-server` (Apache-2.0),
+OpenH264 built from source (BSD-2-Clause; Cisco's H.264 royalty coverage applies only to
+Cisco's own binaries), ONNX Runtime and Dawn (MIT / BSD-3-Clause), the GLM-OCR model
+(MIT), and preprocessing code ported from oar-ocr (Apache-2.0).

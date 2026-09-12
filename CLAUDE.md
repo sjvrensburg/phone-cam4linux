@@ -42,6 +42,16 @@ Exercise the whole V4L2 sink path with **no phone attached**:
 ./target/release/pc4l --test-pattern --device /dev/video10
 ```
 
+## Releases
+
+`.github/workflows/release.yml` runs on a `v*` tag: builds both binaries on
+ubuntu-22.04, packages them with the dereferenced `libwebgpu_dawn.so`, docs and
+`contrib/`, builds the model archive with `pc4l-gui --fetch-model` (so it carries the
+in-binary checksums), and publishes a GitHub release with `SHA256SUMS.txt`. Cut one with
+`git tag vX.Y.Z && git push --tags` after bumping `[workspace.package].version`.
+`LICENSE` is Apache-2.0 and `NOTICE` lists third-party terms -- keep it current when a
+component is added (a model, a runtime, ported code).
+
 ## Build-time network dependency
 
 `phone-cam4linux/build.rs` downloads `scrcpy-server-v<SCRCPY_VERSION>` from GitHub

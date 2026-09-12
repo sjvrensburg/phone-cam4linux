@@ -126,6 +126,19 @@ fn ensure_model(progress: &dyn Fn(String)) -> Result<PathBuf> {
         }
     }
     let dir = cache_dir();
+    download_into(&dir, progress)?;
+    Ok(dir)
+}
+
+/// The directory name the model lives under (`models/<this>/` next to the binary).
+pub fn model_dir_name() -> &'static str {
+    MODEL_NAME
+}
+
+/// Downloads the model into `dir` (files already present at the right size are
+/// kept), verifying every file's SHA-256. `pc4l-gui --fetch-model DIR` for scripts
+/// and release packaging.
+pub fn download_into(dir: &Path, progress: &dyn Fn(String)) -> Result<()> {
     log::info!(
         "downloading {} ({} MB) to {}",
         MODEL_NAME,
@@ -189,7 +202,7 @@ fn ensure_model(progress: &dyn Fn(String)) -> Result<PathBuf> {
         std::fs::rename(&part, &target)?;
         done += file.size;
     }
-    Ok(dir)
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

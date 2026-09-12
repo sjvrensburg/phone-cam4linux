@@ -1,0 +1,89 @@
+name: Release
+
+# Tag `vX.Y.Z` -> a GitHub release with:
+#   pc4l-vX.Y.Z-x86_64-linux.tar.gz        pc4l, pc4l-gui, libwebgpu_dawn.so, docs, contrib/
+#   pc4l-model-glm-ocr-onnx-q4f16.tar.gz   the built-in model (~650 MB), extracts to models/
+# Extracting both into one directory gives pc4l-gui the model beside the binary, with no
+# download at first run. The model archive is built by the binary's own --fetch-model, so it
+# is verified against the same checksums the app enforces.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  PHONE_CAM4LINUX_SERVER_JAR: ${{ github.workspace }}/.cache/scrcpy-server.jar
+
+jobs:
+  build:
+    name: linux x86_64
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm libclang-dev pkg-config libxkbcommon-dev libwayland-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Fetch scrcpy-server jar
+        run: |
+          mkdir -p .cache
+          version=$(sed -n 's/^const SCRCPY_VERSION: &str = "\(.*\)";/\1/p' phone-cam4linux/build.rs)
+          curl -fsSL -o .cache/scrcpy-server.jar \
+            "https://github.com/Genymobile/scrcpy/releases/download/v${version}/scrcpy-server-v${version}"
+
+      - name: Build
+        run: cargo build --release -p pc4l -p pc4l-gui
+
+      - name: Package binaries
+        id: pkg
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          name="pc4l-${tag}-x86_64-linux"
+          mkdir -p "dist/${name}"
+          cp target/release/pc4l target/release/pc4l-gui "dist/${name}/"
+          # ort leaves the WebGPU provider as a symlink into its cache; ship the real file.
+          cp -L target/release/libwebgpu_dawn.so "dist/${name}/"
+          cp README.md LICENSE NOTICE "dist/${name}/"
+          cp -r contrib "dist/${name}/contrib"
+          tar -C dist -czf "dist/${name}.tar.gz" "${name}"
+          echo "archive=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "name=${name}" >> "$GITHUB_OUTPUT"
+
+      - name: Package model
+        id: model
+        run: |
+          mkdir -p dist/model/models
+          target/release/pc4l-gui --fetch-model dist/model/models
+          dir=$(ls dist/model/models)
+          tar -C dist/model -czf "dist/pc4l-model-${dir}.tar.gz" "models/${dir}"
+          echo "archive=dist/pc4l-model-${dir}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Checksums
+        run: |
+          cd dist
+          sha256sum *.tar.gz > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Smoke test the archive
+        run: |
+          mkdir -p /tmp/smoke && tar -C /tmp/smoke -xzf "${{ steps.pkg.outputs.archive }}"
+          /tmp/smoke/${{ steps.pkg.outputs.name }}/pc4l --version
+          /tmp/smoke/${{ steps.pkg.outputs.name }}/pc4l-gui --help > /dev/null
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.pkg.outputs.archive }}
+            ${{ steps.model.outputs.archive }}
+            dist/SHA256SUMS.txt
+          generate_release_notes: true
