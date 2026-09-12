@@ -18,6 +18,7 @@
 //! High-speed sizes are ignored: this crate never enables `camera_high_speed`.
 
 use crate::adb::AdbDevice;
+use crate::decode::Backend;
 use crate::error::{Error, Result};
 use crate::session::Facing;
 
@@ -34,13 +35,13 @@ pub struct CameraInfo {
     pub sizes: Vec<(u32, u32)>,
 }
 
-/// Whether this crate can stream a camera at `width`x`height`: the size must survive
-/// scrcpy's encoder alignment (it rounds both dimensions down to a multiple of 8 and
-/// then asks the camera for *that* size, which fails if it isn't a supported mode --
-/// e.g. 4000x2250 becomes 4000x2248 and the capture session never configures) and the
-/// bundled decoder must accept it.
-pub fn is_usable_size(width: u32, height: u32) -> bool {
-    width.is_multiple_of(8) && height.is_multiple_of(8) && crate::decode::fits_decoder(width, height)
+/// Whether this crate can stream a camera at `width`x`height` with `decoder`: the size
+/// must survive scrcpy's encoder alignment (it rounds both dimensions down to a
+/// multiple of 8 and then asks the camera for *that* size, which fails if it isn't a
+/// supported mode -- e.g. 4000x2250 becomes 4000x2248 and the capture session never
+/// configures) and the decoder must accept it.
+pub fn is_usable_size(width: u32, height: u32, decoder: Backend) -> bool {
+    width.is_multiple_of(8) && height.is_multiple_of(8) && decoder.fits(width, height)
 }
 
 impl CameraInfo {
@@ -186,10 +187,13 @@ mod tests {
 
     #[test]
     fn usable_sizes() {
-        assert!(is_usable_size(3840, 2160));
-        assert!(is_usable_size(2992, 2992));
-        assert!(!is_usable_size(4000, 2250), "not 8-aligned");
-        assert!(!is_usable_size(4000, 3000), "too many macroblocks");
+        let b = Backend::Openh264;
+        assert!(is_usable_size(3840, 2160, b));
+        assert!(is_usable_size(2992, 2992, b));
+        assert!(!is_usable_size(4000, 2250, b), "not 8-aligned");
+        assert!(!is_usable_size(4000, 3000, b), "too many macroblocks");
+        #[cfg(feature = "ffmpeg")]
+        assert!(is_usable_size(4000, 3000, Backend::Ffmpeg));
     }
 
     #[test]

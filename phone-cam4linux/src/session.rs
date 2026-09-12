@@ -2,7 +2,7 @@
 
 use crate::adb::{self, AdbDevice};
 use crate::convert::i420_to_yuyv;
-use crate::decode::Decoder;
+use crate::decode::{self, Decoder};
 use crate::error::{Error, Result};
 use crate::protocol;
 use crate::sink::V4l2Sink;
@@ -40,6 +40,8 @@ pub struct ConnectOptions {
     /// Target H.264 bitrate in bits per second. Higher means crisper detail (text,
     /// document edges) at the cost of bandwidth. `None` uses the server default.
     pub bitrate_bps: Option<u32>,
+    /// Which H.264 decoder to use; see [`decode::Backend`].
+    pub decoder: decode::Backend,
 }
 
 impl Default for ConnectOptions {
@@ -50,6 +52,7 @@ impl Default for ConnectOptions {
             resolution: None,
             max_fps: None,
             bitrate_bps: None,
+            decoder: decode::Backend::default(),
         }
     }
 }
@@ -62,6 +65,7 @@ pub(crate) const SERVER_JAR: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/s
 pub const STALL_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct CameraSession {
+    decoder_backend: decode::Backend,
     device: AdbDevice,
     server_process: Child,
     server_log: ServerLog,
@@ -139,6 +143,7 @@ impl CameraSession {
         );
 
         Ok(Self {
+            decoder_backend: opts.decoder,
             device,
             server_process,
             server_log,
@@ -163,7 +168,8 @@ impl CameraSession {
     /// - nothing arrives for [`STALL_TIMEOUT`] -> [`Error::StreamStalled`];
     /// - any other error.
     pub fn run(&mut self, sink: &mut V4l2Sink, stop: &AtomicBool) -> Result<()> {
-        let mut decoder = Decoder::new()?;
+        let mut decoder = Decoder::with_backend(self.decoder_backend)?;
+        log::debug!("decoding with {}", decoder.backend().name());
         let mut yuyv = vec![0u8; (self.meta.width * self.meta.height * 2) as usize];
 
         // A short socket timeout lets us notice `stop` and stalls between reads
@@ -224,10 +230,11 @@ impl CameraSession {
                         return Err(Error::Decode(format!(
                             "no frame decoded after {consecutive_errors} attempts \
                              at {}x{}; the phone's camera resolution may exceed what \
-                             openh264 can decode (try --resolution max). \
+                             the {} decoder can handle (try --resolution max). \
                              Last error: {e}\nscrcpy server output:\n{}",
                             self.meta.width,
                             self.meta.height,
+                            decoder.backend().name(),
                             self.server_log.collected()
                         )));
                     }

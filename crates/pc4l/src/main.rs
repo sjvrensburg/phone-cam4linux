@@ -2,7 +2,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use phone_cam4linux::adb::AdbDevice;
 use phone_cam4linux::cameras::is_usable_size;
-use phone_cam4linux::{decode, loopback, sink::V4l2Sink, CameraInfo, ConnectOptions, Facing};
+use phone_cam4linux::decode::Backend;
+use phone_cam4linux::{loopback, sink::V4l2Sink, CameraInfo, ConnectOptions, Facing};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -34,6 +35,12 @@ struct Args {
     #[arg(long)]
     list_sizes: bool,
 
+    /// H.264 decoder. `openh264` is always available but limited to level-5.2 frame
+    /// sizes (~3840x2160); `ffmpeg` (if compiled in with the `ffmpeg` feature) has no
+    /// such limit. Defaults to ffmpeg when available.
+    #[arg(long, value_enum, default_value_t = DecoderArg::default())]
+    decoder: DecoderArg,
+
     /// Requested max frame rate.
     #[arg(long)]
     fps: Option<u32>,
@@ -61,12 +68,46 @@ enum FacingArg {
     Back,
 }
 
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum DecoderArg {
+    Openh264,
+    #[cfg(feature = "ffmpeg")]
+    Ffmpeg,
+}
+
+impl Default for DecoderArg {
+    fn default() -> Self {
+        Self::from(Backend::default())
+    }
+}
+
+impl From<Backend> for DecoderArg {
+    fn from(b: Backend) -> Self {
+        match b {
+            Backend::Openh264 => DecoderArg::Openh264,
+            #[cfg(feature = "ffmpeg")]
+            Backend::Ffmpeg => DecoderArg::Ffmpeg,
+        }
+    }
+}
+
+impl From<DecoderArg> for Backend {
+    fn from(d: DecoderArg) -> Self {
+        match d {
+            DecoderArg::Openh264 => Backend::Openh264,
+            #[cfg(feature = "ffmpeg")]
+            DecoderArg::Ffmpeg => Backend::Ffmpeg,
+        }
+    }
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     let args = Args::parse();
 
+    let decoder = Backend::from(args.decoder);
     if args.list_sizes {
-        return list_sizes(args.serial.as_deref());
+        return list_sizes(args.serial.as_deref(), decoder);
     }
 
     let video_nr = video_nr_from_path(&args.device)?;
@@ -85,17 +126,22 @@ fn main() -> Result<()> {
     };
     let resolution = match args.resolution.as_deref() {
         None => None,
-        Some("max") => Some(largest_decodable_size(args.serial.as_deref(), facing)?),
+        Some("max") => Some(largest_decodable_size(args.serial.as_deref(), facing, decoder)?),
         Some(s) => {
             let (w, h) = parse_resolution(s)?;
             anyhow::ensure!(
-                decode::fits_decoder(w, h),
-                "{w}x{h} exceeds what the bundled H.264 decoder can handle \
-                 (max {} macroblocks, e.g. 3840x2160); pick a smaller size from --list-sizes",
-                decode::MAX_MACROBLOCKS
+                decoder.fits(w, h),
+                "{w}x{h} exceeds what the {} decoder can handle (e.g. 3840x2160); \
+                 pick a smaller size from --list-sizes{}",
+                decoder.name(),
+                if cfg!(feature = "ffmpeg") {
+                    " or use --decoder ffmpeg"
+                } else {
+                    ", or rebuild with `--features ffmpeg`"
+                }
             );
             anyhow::ensure!(
-                is_usable_size(w, h),
+                is_usable_size(w, h, decoder),
                 "{w}x{h} is not a multiple of 8 in both dimensions; scrcpy would round it \
                  and the camera then rejects the size. Pick another from --list-sizes"
             );
@@ -109,6 +155,7 @@ fn main() -> Result<()> {
         resolution,
         max_fps: args.fps,
         bitrate_bps: Some(args.bitrate.saturating_mul(1_000_000)),
+        decoder,
     };
 
     stream_loop(&args.device, opts, !args.no_reconnect, &stop)
@@ -208,7 +255,7 @@ fn select_device(serial: Option<&str>) -> Result<AdbDevice> {
     })
 }
 
-fn list_sizes(serial: Option<&str>) -> Result<()> {
+fn list_sizes(serial: Option<&str>, decoder: Backend) -> Result<()> {
     let device = select_device(serial)?;
     let cameras = phone_cam4linux::list_cameras(&device).context("listing cameras")?;
     for cam in &cameras {
@@ -220,9 +267,9 @@ fn list_sizes(serial: Option<&str>) -> Result<()> {
         let fps: Vec<String> = cam.fps.iter().map(u32::to_string).collect();
         println!("camera {} ({facing}, fps: {})", cam.id, fps.join("/"));
         for &(w, h) in &cam.sizes {
-            let note = if !decode::fits_decoder(w, h) {
+            let note = if !decoder.fits(w, h) {
                 "   (exceeds decoder limit)"
-            } else if !is_usable_size(w, h) {
+            } else if !is_usable_size(w, h, decoder) {
                 "   (not 8-aligned; rejected by the camera after encoder rounding)"
             } else {
                 ""
@@ -230,11 +277,19 @@ fn list_sizes(serial: Option<&str>) -> Result<()> {
             println!("  {w}x{h}{note}");
         }
     }
-    println!("\nMarked sizes cannot be used; `--resolution max` picks the largest usable one.");
+    println!(
+        "\nMarked sizes cannot be used with the {} decoder; \
+         `--resolution max` picks the largest usable one.",
+        decoder.name()
+    );
     Ok(())
 }
 
-fn largest_decodable_size(serial: Option<&str>, facing: Facing) -> Result<(u32, u32)> {
+fn largest_decodable_size(
+    serial: Option<&str>,
+    facing: Facing,
+    decoder: Backend,
+) -> Result<(u32, u32)> {
     let device = select_device(serial)?;
     let cameras = phone_cam4linux::list_cameras(&device).context("listing cameras")?;
     let cam: &CameraInfo = cameras
@@ -242,7 +297,7 @@ fn largest_decodable_size(serial: Option<&str>, facing: Facing) -> Result<(u32, 
         .find(|c| c.facing == Some(facing))
         .with_context(|| format!("phone reports no {facing:?}-facing camera"))?;
     let size = cam
-        .largest_size(is_usable_size)
+        .largest_size(|w, h| is_usable_size(w, h, decoder))
         .context("camera offers no size the decoder can handle")?;
     log::info!("--resolution max resolved to {}x{}", size.0, size.1);
     Ok(size)

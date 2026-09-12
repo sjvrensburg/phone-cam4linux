@@ -12,6 +12,14 @@ thiserror.workspace = true
 log.workspace = true
 openh264 = { workspace = true, features = ["source"] }
 v4l.workspace = true
+ffmpeg-next = { workspace = true, optional = true }
+
+[features]
+default = []
+# Decode with the system FFmpeg (libavcodec's native h264 decoder) instead of the
+# bundled openh264, lifting the 3840x2160-class size ceiling. Needs libavcodec/
+# libavutil development headers at build time and a full (non "-free") FFmpeg.
+ffmpeg = ["dep:ffmpeg-next"]
 
 [build-dependencies]
 sha2 = "0.10"

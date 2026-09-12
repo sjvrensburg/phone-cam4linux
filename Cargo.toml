@@ -17,3 +17,4 @@ clap = { version = "4", features = ["derive"] }
 openh264 = "0.9"
 v4l = "0.14"
 ctrlc = "3"
+ffmpeg-next = "9"
