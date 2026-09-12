@@ -40,7 +40,7 @@ pub struct CameraInfo {
 /// e.g. 4000x2250 becomes 4000x2248 and the capture session never configures) and the
 /// bundled decoder must accept it.
 pub fn is_usable_size(width: u32, height: u32) -> bool {
-    width % 8 == 0 && height % 8 == 0 && crate::decode::fits_decoder(width, height)
+    width.is_multiple_of(8) && height.is_multiple_of(8) && crate::decode::fits_decoder(width, height)
 }
 
 impl CameraInfo {
