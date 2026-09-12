@@ -52,8 +52,9 @@ mirroring, audio, or input control.
 
 ## Install
 
-**Release archive** (x86_64 Linux, needs a CPU with AVX2 for the built-in model's ONNX
-Runtime): download `pc4l-<version>-x86_64-linux.tar.gz` from the
+**Release archive** (x86_64 Linux with glibc 2.38 or newer -- Ubuntu 24.04, Fedora 39,
+Debian 13 and later -- and a CPU with AVX2, both requirements of the built-in model's
+prebuilt ONNX Runtime): download `pc4l-<version>-x86_64-linux.tar.gz` from the
 [releases page](https://github.com/sjvrensburg/phone-cam4linux/releases) and extract
 it anywhere; it contains `pc4l`, `pc4l-gui`, the `libwebgpu_dawn.so` the GUI's GPU path
 needs (found next to the binary), and `contrib/`. The built-in transcription model

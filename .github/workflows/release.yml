@@ -21,7 +21,9 @@ env:
 jobs:
   build:
     name: linux x86_64
-    runs-on: ubuntu-22.04
+    # pyke's prebuilt ONNX Runtime (pc4l-gui) links against glibc 2.38 / GLIBCXX 3.4.32,
+    # so the archive needs a 2024-or-newer distro; 22.04 fails at link time.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
