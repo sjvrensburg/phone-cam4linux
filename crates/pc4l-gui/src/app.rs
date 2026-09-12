@@ -398,6 +398,15 @@ impl App {
             .is_none_or(|s| s.starts_with("ready") || s.starts_with("unavailable"))
     }
 
+    /// Any change to the camera itself (zoom) makes a frozen capture stale: drop it
+    /// so the preview shows what the phone now sees.
+    fn go_live(&mut self) {
+        if self.captured.is_some() {
+            self.captured = None;
+            self.say("live again (zoom changed)");
+        }
+    }
+
     fn rotate(&mut self, rotation: Rotation) {
         if rotation != self.rotation {
             self.rotation = rotation;
@@ -489,6 +498,7 @@ impl App {
                     .fixed_decimals(2),
             );
             if slider.changed() {
+                self.go_live();
                 self.shared().set_zoom(value);
             }
             if ui
@@ -496,6 +506,7 @@ impl App {
                 .on_hover_text("reset the phone's zoom")
                 .clicked()
             {
+                self.go_live();
                 self.shared().set_zoom(1.0);
             }
         }
@@ -540,6 +551,7 @@ impl App {
             if self.captured.is_some() {
                 ui.separator();
                 ui.strong("CAPTURED");
+                ui.weak("preview frozen — space or esc goes back to live");
             }
             if let Some((msg, at)) = &self.message {
                 if at.elapsed().as_secs() < 8 {
@@ -621,6 +633,7 @@ impl App {
             let delta = ui.input(|i| i.smooth_scroll_delta.y);
             let notches = wheel_notches(&mut self.wheel_preview, delta);
             if notches != 0 {
+                self.go_live();
                 self.shared().step_zoom(notches);
             }
         }
@@ -808,6 +821,9 @@ impl App {
                 i.key_pressed(Key::Num0),
             )
         });
+        if zoom_in || zoom_out || zoom_reset {
+            self.go_live();
+        }
         if zoom_in {
             self.shared().step_zoom(2);
         }
