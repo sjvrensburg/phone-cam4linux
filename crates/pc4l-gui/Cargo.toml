@@ -36,12 +36,21 @@ half = { version = "2", optional = true }
 ndarray = { version = "0.17", optional = true }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"], optional = true }
 sha2 = { version = "0.10", optional = true }
+# math: readings rendered with Typst, their LaTeX converted by MiTeX.
+typst-as-lib = { version = "0.16", features = ["typst-kit-fonts", "typst-kit-embed-fonts"], optional = true }
+typst = { version = "0.15", optional = true }
+typst-layout = { version = "0.15", optional = true }
+typst-render = { version = "0.15", optional = true }
+mitex = { version = "0.2", optional = true }
 
 [features]
-default = ["local-model"]
+default = ["local-model", "math"]
 ffmpeg = ["phone-cam4linux/ffmpeg"]
 # The out-of-the-box models: GLM-OCR (onnx-community q4f16 export) for reading and
 # PP-DocLayoutV3 for block detection, run through ONNX Runtime, WebGPU (Vulkan on
 # Linux) with CPU fallback. Downloads pyke's prebuilt ONNX Runtime at build time and
 # the models (~650 MB + ~130 MB) on first use.
 local-model = ["dep:ort", "dep:half", "dep:ndarray", "dep:tokenizers", "dep:sha2"]
+# Readings shown typeset: the LaTeX the models emit is converted to Typst math by
+# MiTeX and rendered by Typst with its embedded fonts (adds ~40 MB to the binary).
+math = ["dep:typst-as-lib", "dep:typst", "dep:typst-layout", "dep:typst-render", "dep:mitex"]

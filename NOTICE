@@ -60,6 +60,20 @@ oar-ocr (https://github.com/GreatV/oar-ocr)
   MRoPE position-id construction in crates/pc4l-gui/src/local/glmocr.rs are
   ported from its oar-ocr-vl crate.
 
+Typst (https://github.com/typst/typst)
+  Copyright the Typst contributors. Apache License 2.0.
+  Typesets the readings (feature `math`, on by default) through the typst,
+  typst-layout, typst-render and typst-as-lib crates. The fonts embedded via
+  typst-assets are shipped inside pc4l-gui: New Computer Modern (GUST Font License),
+  Libertinus (SIL Open Font License 1.1) and DejaVu Sans Mono (Bitstream Vera
+  Fonts license).
+
+MiTeX (https://github.com/mitex-rs/mitex)
+  Copyright the MiTeX contributors. Apache License 2.0.
+  Converts the LaTeX maths in a reading to Typst (the `mitex` crate); the Typst
+  side of the package (`specs/`, the scope the converted commands resolve in) is
+  vendored in crates/pc4l-gui/assets/mitex/ with its LICENSE.
+
 egui / eframe (https://github.com/emilk/egui)
   Copyright Emil Ernerfeldt. MIT License or Apache License 2.0.
 

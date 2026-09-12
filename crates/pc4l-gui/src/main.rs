@@ -6,6 +6,8 @@ mod app;
 mod layout;
 #[cfg(feature = "local-model")]
 mod local;
+#[cfg(feature = "math")]
+mod mathtext;
 mod stream;
 mod transcribe;
 
@@ -257,6 +259,11 @@ fn main() -> Result<()> {
         });
     #[cfg(not(feature = "local-model"))]
     let detector: Option<std::sync::Arc<dyn layout::BlockDetector>> = None;
+    #[cfg(feature = "math")]
+    let typesetter: Option<std::sync::Arc<dyn app::Typesetter>> =
+        Some(std::sync::Arc::new(mathtext::Renderer::new()));
+    #[cfg(not(feature = "math"))]
+    let typesetter: Option<std::sync::Arc<dyn app::Typesetter>> = None;
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -270,7 +277,8 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             let worker = Worker::start(config, move || ctx.request_repaint());
-            let mut app = app::App::new(worker, save_dir, backends, detector, screenshot);
+            let mut app =
+                app::App::new(worker, save_dir, backends, detector, typesetter, screenshot);
             app.set_rotation(rotation);
             app.set_crop(dev_crop);
             app.set_dev_read(dev_read);

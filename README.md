@@ -71,8 +71,8 @@ cargo build --release                      # or: cargo build --release --feature
 needs a Rust toolchain, `nasm` (OpenH264 assembly), `libclang` (bindgen for the V4L2
 bindings), and for the GUI `libxkbcommon` and `libwayland` development files. The first
 build downloads the pinned `scrcpy-server` jar and (for the GUI) prebuilt ONNX Runtime
-binaries; `cargo build --release -p pc4l-gui --no-default-features` skips the latter and
-the built-in models. `pc4l-gui --fetch-model DIR` downloads the models into `DIR/` with
+binaries; `cargo build --release -p pc4l-gui --no-default-features` skips the latter,
+the built-in models and the Typst typesetting. `pc4l-gui --fetch-model DIR` downloads the models into `DIR/` with
 checksum verification, for machines that will be offline (set `HF_TOKEN` to a Hugging
 Face token if anonymous downloads are being rate-limited; the files are public).
 
@@ -137,8 +137,14 @@ zoom, in x1.0625 steps -- not a crop of the stream).
 
 **Read it** sends the box (or the whole page) to a transcription backend and lists
 every distinct answer with how many samples gave it -- several readings are shown as
-several readings, never merged, and an empty answer is reported, not hidden. Backends
-live in `~/.config/pc4l/gui.toml` (written with defaults on first run):
+several readings, never merged, and an empty answer is reported, not hidden. Readings
+are shown **typeset**: the LaTeX the models write for maths (`$\hat{y}_i \neq y_i$`)
+is converted to Typst by [MiTeX](https://github.com/mitex-rs/mitex) and rendered by
+[Typst](https://typst.app) with its embedded fonts, so a formula can be checked
+against the ink at a glance; the `typeset` checkbox shows the raw text instead, `copy`
+always copies the raw text, and anything that does not convert stays text. (The
+`math` cargo feature, on by default; about 40 MB of the binary.) Backends live in
+`~/.config/pc4l/gui.toml` (written with defaults on first run):
 
 - `kind = "local"` -- the built-in model, [GLM-OCR](https://huggingface.co/zai-org/GLM-OCR)
   (0.9B, handwriting and math) as the `onnx-community` q4f16 ONNX export, run through
@@ -241,4 +247,5 @@ embeds, downloads or links -- notably the upstream `scrcpy-server` (Apache-2.0),
 OpenH264 built from source (BSD-2-Clause; Cisco's H.264 royalty coverage applies only to
 Cisco's own binaries), ONNX Runtime and Dawn (MIT / BSD-3-Clause), the GLM-OCR model
 (MIT), the PP-DocLayoutV3 model and the post-processing ported from PaddleX (Apache-2.0),
-and preprocessing code ported from oar-ocr (Apache-2.0).
+preprocessing code ported from oar-ocr (Apache-2.0), Typst and MiTeX (Apache-2.0) with
+the fonts Typst embeds (GUST, OFL and Bitstream Vera licences).

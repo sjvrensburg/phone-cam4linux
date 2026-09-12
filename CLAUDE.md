@@ -15,7 +15,7 @@ conversion, V4L2 sink) is implemented here.
 ```
 cargo build --release                 # fetches scrcpy-server.jar on first build (needs network)
 cargo build --release --features ffmpeg   # + system libavcodec decoder (needs full FFmpeg headers)
-cargo build --release -p pc4l-gui --no-default-features   # GUI without the built-in ONNX models (no ort download)
+cargo build --release -p pc4l-gui --no-default-features   # GUI without the built-in ONNX models (no ort download) or Typst
 cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion, GUI crop geometry, quad rectification)
 cargo test -p phone-cam4linux protocol::tests::parses_codec_meta   # single test
 cargo clippy --workspace --all-targets [--features ffmpeg]
@@ -110,7 +110,13 @@ the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 readings are grouped and counted, never merged; `layout.rs`: the `BlockDetector`
 trait, `Block`/`Quad` in view space and the perspective `rectify` (imageproc) a
 non-rectangular block goes through before it is shown or read -- feature-independent
-so the window builds without a detector; `local/`: the built-in models --
+so the window builds without a detector; `mathtext.rs` (feature `math`): readings
+typeset by Typst -- `$…$`/`$$…$$`/`\(…\)`/`\[…\]` segments converted by the `mitex`
+crate and evaluated inside MiTeX's Typst scope (vendored under `assets/mitex/`, so
+`\operatorname` and friends resolve), the rest escaped as markup, rasterised by
+`typst-render` at the window's pixel density and cached per reading as a texture
+(`app::Typeset`); a reading that fails to compile is shown as text; `local/`: the
+built-in models --
 `local/glmocr.rs` drives the onnx-community three-graph GLM-OCR export through `ort`
 (vision encoder, embeddings, merged decoder with an explicit KV cache and the
 undocumented scalar `num_logits_to_keep` input; preprocessing and MRoPE position ids

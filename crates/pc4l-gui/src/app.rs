@@ -23,7 +23,7 @@ use egui::{
 use phone_cam4linux::convert::{i420_region_to_rgba, region_size, rotate_rgba, Rotation};
 use phone_cam4linux::decode::YuvFrame;
 use phone_cam4linux::Facing;
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::mpsc::{self, Receiver};
 use std::sync::Arc;
@@ -154,6 +154,39 @@ fn wheel_notches(accum: &mut f32, delta: f32) -> i32 {
     let notches = (*accum / NOTCH).trunc();
     *accum -= notches * NOTCH;
     notches as i32
+}
+
+/// Typesets a reading (LaTeX maths and all) into pixels; `None` in a build without
+/// one. Implemented by `mathtext::Renderer`.
+pub trait Typesetter: Send + Sync {
+    /// `width_pt` points wide, text `size_pt`, `scale` pixels per point, in `rgb`.
+    fn render(
+        &self,
+        text: &str,
+        width_pt: f32,
+        size_pt: f32,
+        scale: f32,
+        rgb: [u8; 3],
+    ) -> anyhow::Result<(image::RgbaImage, f32)>;
+}
+
+/// Width the readings are typeset at, in points; shown scaled down if the panel
+/// is narrower.
+const TYPESET_WIDTH_PT: f32 = 440.0;
+const TYPESET_SIZE_PT: f32 = 15.0;
+
+/// A reading typeset, or why not.
+enum Typeset {
+    Image { texture: TextureHandle, size: Vec2 },
+    Failed,
+}
+
+/// One entry in the results list: its block label (in a "read all"), the answer,
+/// and the typeset readings, made on first show.
+struct ResultEntry {
+    label: Option<String>,
+    result: Result<Transcription, String>,
+    typeset: HashMap<usize, Typeset>,
 }
 
 /// What a results list belongs to.
@@ -332,8 +365,11 @@ pub struct App {
     /// For waking the UI from the read thread; set on the first frame.
     ctx: Option<egui::Context>,
     pending: Option<PendingRead>,
-    /// Readings for the current capture, oldest first, each with its block label.
-    results: Vec<(Option<String>, Result<Transcription, String>)>,
+    /// Readings for the current capture, oldest first.
+    results: Vec<ResultEntry>,
+    typesetter: Option<Arc<dyn Typesetter>>,
+    /// Show readings typeset (maths rendered) rather than as raw text.
+    typeset_on: bool,
     /// What `results` were read from; they are dropped when a read of something
     /// else starts or the capture goes.
     results_key: Option<(Arc<YuvFrame>, ResultsScope)>,
@@ -370,6 +406,7 @@ impl App {
         save_dir: PathBuf,
         backends: Vec<Arc<dyn Transcriber>>,
         detector: Option<Arc<dyn BlockDetector>>,
+        typesetter: Option<Arc<dyn Typesetter>>,
         screenshot: Option<(Duration, PathBuf)>,
     ) -> Self {
         Self {
@@ -392,6 +429,8 @@ impl App {
             ctx: None,
             pending: None,
             results: Vec::new(),
+            typesetter: typesetter.clone(),
+            typeset_on: typesetter.is_some(),
             results_key: None,
             detector,
             blocks: Vec::new(),
@@ -664,7 +703,11 @@ impl App {
             };
             if let Some(result) = done {
                 let label = label.clone();
-                self.results.push((label, result));
+                self.results.push(ResultEntry {
+                    label,
+                    result,
+                    typeset: HashMap::new(),
+                });
                 self.pending = None;
                 self.next_queued_read();
             }
@@ -1409,6 +1452,12 @@ impl App {
             if !self.results.is_empty() && ui.small_button("clear").clicked() {
                 self.results.clear();
             }
+            if self.typesetter.is_some() {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.checkbox(&mut self.typeset_on, "typeset")
+                        .on_hover_text("render the maths; off shows the raw text");
+                });
+            }
         });
         ui.separator();
         egui::ScrollArea::vertical()
@@ -1416,16 +1465,19 @@ impl App {
             .show(ui, |ui| {
                 // One read at a time: newest on top. A "read all": in page order.
                 let in_order = matches!(self.results_key, Some((_, ResultsScope::AllBlocks)));
-                let mut ordered: Vec<_> = self.results.iter().collect();
+                let typesetter = self.typeset_on.then(|| self.typesetter.clone()).flatten();
+                let mut ordered: Vec<_> = self.results.iter_mut().collect();
                 if !in_order {
                     ordered.reverse();
                 }
-                for (label, result) in ordered {
-                    if let Some(label) = label {
+                for entry in ordered {
+                    if let Some(label) = &entry.label {
                         ui.strong(label);
                     }
-                    match result {
-                        Ok(t) => show_transcription(ui, t),
+                    match &entry.result {
+                        Ok(t) => {
+                            show_transcription(ui, t, typesetter.as_deref(), &mut entry.typeset)
+                        }
                         Err(e) => {
                             ui.colored_label(ui.visuals().error_fg_color, e);
                         }
@@ -1657,7 +1709,14 @@ impl eframe::App for App {
 
 /// One backend's answer: every distinct reading with its support, and what did not
 /// come back. Text is selectable, with a copy button, since the point is to use it.
-fn show_transcription(ui: &mut egui::Ui, t: &Transcription) {
+/// With a typesetter, each reading is rendered on first show and cached in
+/// `typeset` by its index; a reading that fails to render stays text.
+fn show_transcription(
+    ui: &mut egui::Ui,
+    t: &Transcription,
+    typesetter: Option<&dyn Typesetter>,
+    typeset: &mut HashMap<usize, Typeset>,
+) {
     ui.horizontal(|ui| {
         ui.strong(&t.backend);
         ui.weak(format!(
@@ -1673,7 +1732,7 @@ fn show_transcription(ui: &mut egui::Ui, t: &Transcription) {
             "no answer: every sample came back empty",
         );
     }
-    for r in &t.readings {
+    for (i, r) in t.readings.iter().enumerate() {
         ui.horizontal(|ui| {
             if t.samples > 1 {
                 ui.weak(format!("{}/{}", r.count, t.samples));
@@ -1685,7 +1744,23 @@ fn show_transcription(ui: &mut egui::Ui, t: &Transcription) {
             {
                 ui.ctx().copy_text(r.text.clone());
             }
-            ui.add(egui::Label::new(egui::RichText::new(&r.text).size(18.0)).wrap());
+            let rendered = typesetter.map(|ts| {
+                typeset
+                    .entry(i)
+                    .or_insert_with(|| typeset_reading(ui, ts, &r.text))
+            });
+            match rendered {
+                Some(Typeset::Image { texture, size }) => {
+                    ui.add(
+                        egui::Image::from_texture(&*texture)
+                            .fit_to_exact_size(*size)
+                            .max_width(ui.available_width()),
+                    );
+                }
+                _ => {
+                    ui.add(egui::Label::new(egui::RichText::new(&r.text).size(18.0)).wrap());
+                }
+            }
         });
         if r.truncated {
             ui.colored_label(ui.visuals().warn_fg_color, "cut off at the token limit");
@@ -1696,6 +1771,36 @@ fn show_transcription(ui: &mut egui::Ui, t: &Transcription) {
             ui.visuals().warn_fg_color,
             format!("{} of {} answers came back empty", t.silent, t.samples),
         );
+    }
+}
+
+/// Renders one reading into a texture in the window's text colour.
+fn typeset_reading(ui: &egui::Ui, ts: &dyn Typesetter, text: &str) -> Typeset {
+    let colour = ui.visuals().text_color();
+    let scale = ui.ctx().pixels_per_point() * 1.5;
+    match ts.render(
+        text,
+        TYPESET_WIDTH_PT,
+        TYPESET_SIZE_PT,
+        scale,
+        [colour.r(), colour.g(), colour.b()],
+    ) {
+        Ok((image, scale)) => {
+            let (w, h) = (image.width() as usize, image.height() as usize);
+            let texture = ui.ctx().load_texture(
+                "reading",
+                ColorImage::from_rgba_unmultiplied([w, h], image.as_raw()),
+                TextureOptions::LINEAR,
+            );
+            Typeset::Image {
+                texture,
+                size: Vec2::new(w as f32 / scale, h as f32 / scale),
+            }
+        }
+        Err(e) => {
+            log::warn!("typesetting a reading failed, showing it as text: {e}");
+            Typeset::Failed
+        }
     }
 }
 
