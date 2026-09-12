@@ -59,7 +59,7 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
    Wi-Fi (`adb connect` exits 0 even on failure -- the verdict is in its text).
 2. **`session.rs`** — the orchestrator and public API (`CameraSession`, `ConnectOptions`,
    `Facing`). `connect()` starts the server with a fixed set of scrcpy options and
-   completes the handshake; `connect_with_stop()`/`run(sink, stop)`; the latter is the blocking decode→convert→write loop
+   completes the handshake; `connect_with_stop()`/`run(sink, stop)`; the latter is the blocking decode→sink loop
    (stop flag checked per packet / every 500 ms; `STALL_TIMEOUT` of silence →
    `Error::StreamStalled`). The server's stdout/stderr is relayed into `log`.
    **`cameras.rs`** parses the server's `list_camera_sizes=true` report.
@@ -69,8 +69,11 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
    hand-built fixtures.
 4. **`decode.rs`** — Annex-B → I420 via `openh264` (statically linked via `source`
    feature) or, with the `ffmpeg` feature, system libavcodec (`Backend::Ffmpeg`).
-5. **`convert.rs`** — I420 → packed YUYV422.
-6. **`sink.rs`** — `v4l` crate mmap output stream to `/dev/videoN`.
+5. **`convert.rs`** — I420 → packed YUYV422 (V4L2) and → RGBA8 (whole, cropped region, or
+   decimated for a preview) for on-screen display.
+6. **`sink.rs`** — the `FrameSink` trait `run()` feeds (implemented by `V4l2Sink` and by any
+   `FnMut(&YuvFrame) -> Result<()>` closure, which is how a GUI gets frames), and
+   `V4l2Sink`: `v4l` crate mmap output stream to `/dev/videoN`.
 7. **`loopback.rs`** — auto-loads `v4l2loopback` via `pkexec modprobe` if the device
    node is missing.
 

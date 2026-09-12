@@ -2,11 +2,10 @@
 //! V4L2 device.
 
 use crate::adb::{self, AdbDevice};
-use crate::convert::i420_to_yuyv;
 use crate::decode::{self, Decoder};
 use crate::error::{Error, Result};
 use crate::protocol;
-use crate::sink::V4l2Sink;
+use crate::sink::{FrameSink, V4l2Sink};
 use std::io::BufReader;
 use std::io::Read;
 use std::net::TcpStream;
@@ -184,17 +183,16 @@ impl CameraSession {
         self.frames_decoded
     }
 
-    /// Blocks, decoding the camera stream and writing frames to `sink` (which must
-    /// have been opened at [`Self::meta`]'s size) until:
+    /// Blocks, decoding the camera stream and handing each frame to `sink` (a
+    /// [`V4l2Sink`] opened at [`Self::meta`]'s size, or any other [`FrameSink`]) until:
     ///
     /// - `stop` becomes true (checked at least every 500 ms) -> `Ok(())`;
     /// - the phone closes the stream -> `Ok(())`;
     /// - nothing arrives for [`STALL_TIMEOUT`] -> [`Error::StreamStalled`];
     /// - any other error.
-    pub fn run(&mut self, sink: &mut V4l2Sink, stop: &AtomicBool) -> Result<()> {
+    pub fn run<S: FrameSink + ?Sized>(&mut self, sink: &mut S, stop: &AtomicBool) -> Result<()> {
         let mut decoder = Decoder::with_backend(self.decoder_backend)?;
         log::debug!("decoding with {}", decoder.backend().name());
-        let mut yuyv = vec![0u8; (self.meta.width * self.meta.height * 2) as usize];
 
         // A short socket timeout lets us notice `stop` and stalls between reads
         // without losing partial packets: `Interruptible` retries the *same* read.
@@ -242,8 +240,7 @@ impl CameraSession {
                     self.frames_decoded += 1;
                     decoded_any = true;
                     consecutive_errors = 0;
-                    i420_to_yuyv(&frame, &mut yuyv);
-                    sink.write_frame(&yuyv)?;
+                    sink.frame(&frame)?;
                 }
                 Ok(None) => {}
                 Err(e) => {

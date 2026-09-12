@@ -1,6 +1,9 @@
-//! V4L2 output sink, writing YUYV422 frames to a `v4l2loopback` device via the `v4l`
-//! crate's safe mmap streaming API (rather than hand-rolled ioctls).
+//! Where decoded frames go: the [`FrameSink`] trait that [`crate::CameraSession::run`]
+//! feeds, and [`V4l2Sink`], which writes YUYV422 frames to a `v4l2loopback` device via
+//! the `v4l` crate's safe mmap streaming API (rather than hand-rolled ioctls).
 
+use crate::convert::i420_to_yuyv;
+use crate::decode::YuvFrame;
 use crate::error::{Error, Result};
 use std::path::Path;
 use v4l::buffer::Type;
@@ -10,11 +13,43 @@ use v4l::io::mmap::Stream as MmapStream;
 use v4l::io::traits::OutputStream;
 use v4l::video::Output;
 
+/// Consumer of decoded frames. [`crate::CameraSession::run`] calls [`frame`](Self::frame)
+/// once per decoded frame, on the decoding thread, at the size in
+/// [`crate::CameraSession::meta`]; returning an error ends the session.
+///
+/// Implemented by [`V4l2Sink`] and by any `FnMut(&YuvFrame) -> Result<()>`, so a
+/// preview or recorder can be a closure (annotate the parameter type; inference
+/// can't pick the lifetime on its own):
+///
+/// ```no_run
+/// # use phone_cam4linux::{decode::YuvFrame, CameraSession, ConnectOptions};
+/// # use std::sync::atomic::AtomicBool;
+/// # fn main() -> phone_cam4linux::Result<()> {
+/// let mut session = CameraSession::connect(ConnectOptions::default())?;
+/// let mut show = |frame: &YuvFrame| {
+///     println!("{}x{}", frame.width, frame.height);
+///     Ok(())
+/// };
+/// session.run(&mut show, &AtomicBool::new(false))
+/// # }
+/// ```
+pub trait FrameSink {
+    fn frame(&mut self, frame: &YuvFrame) -> Result<()>;
+}
+
+impl<F: FnMut(&YuvFrame) -> Result<()>> FrameSink for F {
+    fn frame(&mut self, frame: &YuvFrame) -> Result<()> {
+        self(frame)
+    }
+}
+
 pub struct V4l2Sink {
     device: Device,
     stream: Option<MmapStream<'static>>,
     width: u32,
     height: u32,
+    /// Scratch buffer for the I420 -> YUYV conversion, reused across frames.
+    yuyv: Vec<u8>,
 }
 
 impl V4l2Sink {
@@ -47,6 +82,7 @@ impl V4l2Sink {
             stream: None,
             width,
             height,
+            yuyv: vec![0u8; (width * height * 2) as usize],
         })
     }
 
@@ -81,5 +117,22 @@ impl V4l2Sink {
         buf[..yuyv.len()].copy_from_slice(yuyv);
         meta.bytesused = yuyv.len() as u32;
         Ok(())
+    }
+}
+
+impl FrameSink for V4l2Sink {
+    /// Converts to YUYV and writes it; `frame` must match the negotiated size.
+    fn frame(&mut self, frame: &YuvFrame) -> Result<()> {
+        if (frame.width, frame.height) != (self.width as usize, self.height as usize) {
+            return Err(Error::Sink(format!(
+                "frame is {}x{}, sink was opened at {}x{}",
+                frame.width, frame.height, self.width, self.height
+            )));
+        }
+        let mut yuyv = std::mem::take(&mut self.yuyv);
+        i420_to_yuyv(frame, &mut yuyv);
+        let result = self.write_frame(&yuyv);
+        self.yuyv = yuyv;
+        result
     }
 }
