@@ -174,10 +174,10 @@ pub struct App {
     results: Vec<Result<Transcription, String>>,
     /// What `results` were read from; they are dropped when it changes.
     results_key: Option<(Arc<YuvFrame>, Option<Crop>)>,
-    /// Slider value being dragged, not yet applied.
-    zoom_pending: Option<f32>,
     /// Development aid: read once, as soon as a frame is available.
     dev_read: bool,
+    /// Development aid: a zoom to apply live, and when the first frame was seen.
+    dev_zoom: Option<(f32, Option<Instant>)>,
     /// Development aid: write a screenshot of the window to this path after the
     /// delay, then quit.
     screenshot: Option<(Duration, PathBuf, Instant)>,
@@ -208,10 +208,14 @@ impl App {
             pending: None,
             results: Vec::new(),
             results_key: None,
-            zoom_pending: None,
             dev_read: false,
+            dev_zoom: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
         }
+    }
+
+    pub fn set_dev_zoom(&mut self, zoom: Option<f32>) {
+        self.dev_zoom = zoom.map(|z| (z, None));
     }
 
     pub fn set_dev_read(&mut self, on: bool) {
@@ -416,33 +420,29 @@ impl App {
         });
     }
 
-    /// Optical zoom, when the phone reports a range for this camera. Applied when
-    /// the slider is released (it takes a reconnect).
+    /// The phone's own zoom and torch, when the phone reports a zoom range for this
+    /// camera. Both apply live over the control channel.
     fn zoom_control(&mut self, ui: &mut egui::Ui) {
         let Some((lo, hi)) = self.shared().camera().and_then(|c| c.zoom_range) else {
             return;
         };
-        if hi <= lo {
-            return;
-        }
         ui.separator();
-        ui.label("Zoom:");
-        let current = self.shared().zoom();
-        let mut value = self.zoom_pending.unwrap_or(current);
-        let slider = ui.add(
-            egui::Slider::new(&mut value, lo.max(1.0)..=hi)
-                .step_by(0.1)
-                .suffix("x")
-                .fixed_decimals(1),
-        );
-        if slider.changed() {
-            self.zoom_pending = Some(value);
-        }
-        let release = slider.drag_stopped() || (slider.changed() && !slider.dragged());
-        if release {
-            if let Some(v) = self.zoom_pending.take() {
-                self.shared().set_zoom(v);
+        if hi > lo {
+            ui.label("Zoom:");
+            let mut value = self.shared().zoom();
+            let slider = ui.add(
+                egui::Slider::new(&mut value, lo.max(1.0)..=hi)
+                    .logarithmic(true)
+                    .suffix("x")
+                    .fixed_decimals(2),
+            );
+            if slider.changed() {
+                self.shared().set_zoom(value);
             }
+        }
+        let mut torch = self.shared().torch();
+        if ui.checkbox(&mut torch, "Torch").changed() {
+            self.shared().set_torch(torch);
         }
     }
 
@@ -774,6 +774,19 @@ impl eframe::App for App {
         }
         self.crop = self.crop.and_then(|c| c.clamped(view.0, view.1));
 
+        if let Some((zoom, seen)) = &mut self.dev_zoom {
+            match seen {
+                None => *seen = Some(Instant::now()),
+                Some(at) if at.elapsed() > Duration::from_secs(3) => {
+                    let zoom = *zoom;
+                    self.dev_zoom = None;
+                    self.shared().set_zoom(zoom);
+                }
+                _ => {
+                    ui.ctx().request_repaint_after(Duration::from_millis(200));
+                }
+            }
+        }
         if self.dev_read && self.backend_ready() {
             self.dev_read = false;
             self.read();

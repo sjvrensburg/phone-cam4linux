@@ -52,6 +52,10 @@ pub struct ConnectOptions {
     pub zoom: Option<f32>,
     /// Turn the flash on as a torch while streaming.
     pub torch: bool,
+    /// Also open scrcpy's control channel, for live zoom and torch changes through
+    /// [`CameraSession::control`]. Off by default: it is a second connection and
+    /// a second thing to fail.
+    pub control: bool,
 }
 
 impl Default for ConnectOptions {
@@ -66,7 +70,48 @@ impl Default for ConnectOptions {
             decoder: decode::Backend::default(),
             zoom: None,
             torch: false,
+            control: false,
         }
+    }
+}
+
+/// scrcpy control-message types (ControlMessage.java), the camera-relevant ones.
+const MSG_CAMERA_SET_TORCH: u8 = 18;
+const MSG_CAMERA_ZOOM_IN: u8 = 19;
+const MSG_CAMERA_ZOOM_OUT: u8 = 20;
+
+/// Each zoom-in/out message multiplies or divides the ratio by this (the server
+/// snaps to this log grid first), clamped to the camera's range.
+pub const ZOOM_STEP: f32 = 1.0 + 1.0 / 16.0;
+
+/// A handle on the session's control channel: cheap to clone and usable from any
+/// thread while [`CameraSession::run`] is busy on another.
+#[derive(Clone)]
+pub struct CameraControl {
+    socket: Arc<Mutex<TcpStream>>,
+}
+
+impl CameraControl {
+    fn send(&self, msg: &[u8]) -> Result<()> {
+        use std::io::Write;
+        let mut socket = self.socket.lock().unwrap();
+        socket.write_all(msg)?;
+        socket.flush()?;
+        Ok(())
+    }
+
+    /// One step (x[`ZOOM_STEP`]) further in; the phone clamps at its maximum.
+    pub fn zoom_in(&self) -> Result<()> {
+        self.send(&[MSG_CAMERA_ZOOM_IN])
+    }
+
+    /// One step (÷[`ZOOM_STEP`]) back out; the phone clamps at 1.0 (or its minimum).
+    pub fn zoom_out(&self) -> Result<()> {
+        self.send(&[MSG_CAMERA_ZOOM_OUT])
+    }
+
+    pub fn set_torch(&self, on: bool) -> Result<()> {
+        self.send(&[MSG_CAMERA_SET_TORCH, u8::from(on)])
     }
 }
 
@@ -85,6 +130,7 @@ pub struct CameraSession {
     server_log: ServerLog,
     port: u16,
     socket: BufReader<TcpStream>,
+    control: Option<CameraControl>,
     pub meta: protocol::CodecMeta,
 }
 
@@ -114,7 +160,9 @@ impl CameraSession {
             "video_source=camera".to_string(),
             format!("camera_facing={}", opts.facing.as_arg()),
             "audio=false".to_string(),
-            "control=false".to_string(),
+            format!("control={}", opts.control),
+            // Nothing should arrive on the control channel unasked; we never read it.
+            "clipboard_autosync=false".to_string(),
             "cleanup=false".to_string(),
             "video_codec=h264".to_string(),
             // We reach the server through `adb forward`, so it must listen rather than
@@ -156,6 +204,21 @@ impl CameraSession {
             Ok(s) => s,
             Err(e) => return Err(abort(&device, &mut server_process, &server_log, port, e)),
         };
+        // The server accepts the video connection first, then (with control=true) the
+        // control one on the same socket name; only the first gets the dummy byte.
+        let control = if opts.control {
+            match TcpStream::connect(("127.0.0.1", port)) {
+                Ok(s) => Some(CameraControl {
+                    socket: Arc::new(Mutex::new(s)),
+                }),
+                Err(e) => {
+                    let err = Error::Protocol(format!("opening the control channel: {e}"));
+                    return Err(abort(&device, &mut server_process, &server_log, port, err));
+                }
+            }
+        } else {
+            None
+        };
         let mut socket = BufReader::new(socket);
         // The codec header only arrives once the camera and encoder are up, which can
         // fail silently on the phone; bound the wait and keep it interruptible.
@@ -179,8 +242,14 @@ impl CameraSession {
             server_log,
             port,
             socket,
+            control,
             meta,
         })
+    }
+
+    /// The control channel, if [`ConnectOptions::control`] asked for one.
+    pub fn control(&self) -> Option<CameraControl> {
+        self.control.clone()
     }
 
     /// Convenience for [`Self::run`]: opens `device_path` (a `/dev/videoN` v4l2loopback

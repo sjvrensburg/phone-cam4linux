@@ -6,7 +6,9 @@ use anyhow::{Context, Result};
 use phone_cam4linux::cameras::is_usable_size;
 use phone_cam4linux::decode::YuvFrame;
 use phone_cam4linux::sink::{FrameSink, V4l2Sink};
-use phone_cam4linux::{adb::AdbDevice, CameraInfo, CameraSession, ConnectOptions, Facing};
+use phone_cam4linux::{
+    adb::AdbDevice, CameraControl, CameraInfo, CameraSession, ConnectOptions, Facing, ZOOM_STEP,
+};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -56,6 +58,20 @@ pub struct Shared {
     /// The phone's camera listing, fetched once per worker (it costs a server
     /// round-trip) and reused for `max` resolution and the zoom range.
     cameras: Mutex<Vec<CameraInfo>>,
+    /// The live session's control channel, while one is up.
+    control: Mutex<Option<CameraControl>>,
+    /// Where we believe the phone's zoom is, in [`ZOOM_STEP`] steps from 1.0: the
+    /// control channel only moves relatively and the phone never reports back.
+    zoom_steps: Mutex<i32>,
+}
+
+/// The zoom grid position the server snaps `ratio` to.
+fn zoom_to_steps(ratio: f32) -> i32 {
+    (ratio.max(1.0).ln() / ZOOM_STEP.ln()).round() as i32
+}
+
+fn steps_to_zoom(steps: i32) -> f32 {
+    ZOOM_STEP.powi(steps)
 }
 
 impl Shared {
@@ -88,18 +104,47 @@ impl Shared {
             .cloned()
     }
 
+    /// The zoom ratio as currently applied (or requested for the next connection).
     pub fn zoom(&self) -> f32 {
-        self.config.lock().unwrap().options.zoom.unwrap_or(1.0)
+        steps_to_zoom(*self.zoom_steps.lock().unwrap())
     }
 
-    /// Sets the camera zoom ratio: takes effect through a reconnect.
+    /// Moves the camera zoom to `zoom`: live over the control channel when a session
+    /// is up (the phone snaps to its x1.0625 grid and clamps to its range), and
+    /// remembered for the next connection either way.
     pub fn set_zoom(&self, zoom: f32) {
-        let mut cfg = self.config.lock().unwrap();
-        let value = (zoom > 1.0).then_some(zoom);
-        if cfg.options.zoom != value {
-            cfg.options.zoom = value;
-            drop(cfg);
-            self.restart();
+        let target = zoom_to_steps(zoom);
+        let mut steps = self.zoom_steps.lock().unwrap();
+        let control = self.control.lock().unwrap().clone();
+        match control {
+            Some(control) => {
+                let result = if target > *steps {
+                    (*steps..target).try_for_each(|_| control.zoom_in())
+                } else {
+                    (target..*steps).try_for_each(|_| control.zoom_out())
+                };
+                match result {
+                    Ok(()) => *steps = target,
+                    Err(e) => log::warn!("zoom over the control channel failed: {e}"),
+                }
+            }
+            None => *steps = target,
+        }
+        let applied = steps_to_zoom(*steps);
+        self.config.lock().unwrap().options.zoom = (applied > 1.0).then_some(applied);
+    }
+
+    pub fn torch(&self) -> bool {
+        self.config.lock().unwrap().options.torch
+    }
+
+    /// Torch on/off: live when a session is up, and remembered for the next one.
+    pub fn set_torch(&self, on: bool) {
+        self.config.lock().unwrap().options.torch = on;
+        if let Some(control) = self.control.lock().unwrap().clone() {
+            if let Err(e) = control.set_torch(on) {
+                log::warn!("torch over the control channel failed: {e}");
+            }
         }
     }
 
@@ -140,7 +185,11 @@ impl Worker {
             status: Mutex::new(Status::Connecting),
             config: Mutex::new(config),
             cameras: Mutex::new(Vec::new()),
+            control: Mutex::new(None),
+            zoom_steps: Mutex::new(0),
         });
+        *shared.zoom_steps.lock().unwrap() =
+            zoom_to_steps(shared.config.lock().unwrap().options.zoom.unwrap_or(1.0));
         let thread_shared = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
             .name("pc4l-stream".into())
@@ -260,6 +309,9 @@ fn run_session(
         .context("connecting to phone camera")?;
     let (w, h) = (session.meta.width, session.meta.height);
     log::info!("streaming {w}x{h}");
+    // The phone starts this session at the configured zoom (snapped to its grid).
+    *shared.zoom_steps.lock().unwrap() = zoom_to_steps(config.options.zoom.unwrap_or(1.0));
+    *shared.control.lock().unwrap() = session.control();
 
     if let Some(path) = &config.tee_device {
         if tee.as_ref().is_some_and(|s| s.size() != (w, h)) {
@@ -289,6 +341,7 @@ fn run_session(
         Ok(())
     };
     let result = session.run(&mut sink, &session_stop).context("streaming");
+    *shared.control.lock().unwrap() = None;
     // Only a session that delivered frames resets the backoff; one that fails right
     // after the handshake must keep backing off.
     if session.frames_decoded() > 0 {

@@ -186,6 +186,7 @@ fn main() -> Result<()> {
         decoder,
         zoom: args.zoom,
         torch: args.torch,
+        control: false,
     };
 
     stream_loop(&args, opts, resolution, &stop)

@@ -92,8 +92,12 @@ frame at full resolution.
 ```
 ./target/release/pc4l-gui --rotate 270           # phone on a stand, mounted sideways
 ./target/release/pc4l-gui --device /dev/video10  # also feed the loopback device
-./target/release/pc4l-gui --zoom 2               # start at 2x; a slider changes it later
+./target/release/pc4l-gui --zoom 2               # start at 2x
 ```
+
+When the phone reports a zoom range for the camera, the toolbar has a **Zoom** slider
+and a **Torch** toggle that act live through scrcpy's control channel (the phone's own
+zoom, in x1.0625 steps -- not a crop of the stream).
 
 **Read it** sends the box (or the whole page) to a transcription backend and lists
 every distinct answer with how many samples gave it -- several readings are shown as

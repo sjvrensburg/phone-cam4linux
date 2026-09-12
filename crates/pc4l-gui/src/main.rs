@@ -86,6 +86,11 @@ struct Args {
     /// frame arrives.
     #[arg(long, hide = true)]
     dev_read: bool,
+
+    /// Development aid: 3 s after the first frame, set this zoom over the control
+    /// channel (the live path, as the slider does).
+    #[arg(long, hide = true)]
+    dev_zoom: Option<f32>,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -158,6 +163,7 @@ fn main() -> Result<()> {
             decoder,
             zoom: args.zoom.filter(|&z| z > 1.0),
             torch: false,
+            control: true,
         },
         resolution,
         tee_device: args.device,
@@ -193,6 +199,7 @@ fn main() -> Result<()> {
         })
         .transpose()?;
     let dev_read = args.dev_read;
+    let dev_zoom = args.dev_zoom;
     let screenshot = args
         .screenshot_after
         .zip(args.screenshot_path)
@@ -227,6 +234,7 @@ fn main() -> Result<()> {
             app.set_rotation(rotation);
             app.set_crop(dev_crop);
             app.set_dev_read(dev_read);
+            app.set_dev_zoom(dev_zoom);
             Ok(Box::new(app))
         }),
     )

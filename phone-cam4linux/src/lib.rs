@@ -17,4 +17,4 @@ pub mod sink;
 
 pub use cameras::{list_cameras, CameraInfo};
 pub use error::{Error, Result};
-pub use session::{CameraSession, ConnectOptions, Facing};
+pub use session::{CameraControl, CameraSession, ConnectOptions, Facing, ZOOM_STEP};

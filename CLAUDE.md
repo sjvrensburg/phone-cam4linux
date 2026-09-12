@@ -149,8 +149,12 @@ scrcpy 4.x exposes exactly two: zoom (`camera_zoom=` at start, Camera2
 `CONTROL_ZOOM_RATIO`, Android 11+; the range comes from `--list-sizes` /
 `CameraInfo::zoom_range`) and torch (`camera_torch=`). Both are also live control-socket
 messages (TYPE_CAMERA_ZOOM_IN/OUT = 19/20, step ×1.0625; TYPE_CAMERA_SET_TORCH = 18)
-once `control=true` and a second connection to the forwarded port are in place. No
-exposure, focus or white-balance control exists at any version.
+-- `ConnectOptions::control` opens that second connection (made right after the video
+socket's dummy byte; only the first connection gets one) and `CameraSession::control()`
+hands out a cloneable `CameraControl` usable from any thread while `run()` blocks
+(`phone-cam4linux/examples/control.rs` shows it). The phone never reports the zoom it
+ends up at, so the GUI tracks the step count itself. No exposure, focus or
+white-balance control exists at any version.
 
 ## Scope
 
