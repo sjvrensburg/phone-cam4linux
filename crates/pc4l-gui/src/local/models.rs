@@ -3,7 +3,8 @@
 //! The hundreds of megabytes of graphs are not embedded in the binary (that would
 //! relink them on every build and put them in git); each model is looked up, in
 //! order, in `$PC4L_MODEL_DIR/<name>/`, a `models/<name>/` directory next to the
-//! executable (how a release tarball ships them), and
+//! AppImage (when running as one) or next to the executable (how a release tarball
+//! ships them), and
 //! `$XDG_CACHE_HOME/pc4l/models/<name>/`. If none has it, it is downloaded into the
 //! cache from a pinned Hugging Face revision, each file checked against the sha256
 //! recorded here before it is used.
@@ -102,6 +103,13 @@ fn candidate_dirs(name: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
     if let Some(d) = std::env::var_os("PC4L_MODEL_DIR") {
         dirs.push(PathBuf::from(d).join(name));
+    }
+    // Inside an AppImage the executable's own directory is read-only; the models
+    // go next to the AppImage file, whose path the runtime passes in $APPIMAGE.
+    if let Some(appimage) = std::env::var_os("APPIMAGE") {
+        if let Some(dir) = Path::new(&appimage).parent() {
+            dirs.push(dir.join("models").join(name));
+        }
     }
     if let Some(exe_dir) = std::env::current_exe()
         .ok()

@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <rect x="16" y="16" width="224" height="224" rx="48" fill="#1f2430"/>
+  <!-- phone -->
+  <rect x="64" y="36" width="72" height="140" rx="12" fill="#e8e8e8"/>
+  <rect x="72" y="50" width="56" height="104" rx="4" fill="#3a4152"/>
+  <circle cx="100" cy="165" r="5" fill="#3a4152"/>
+  <!-- lens -->
+  <circle cx="84" cy="62" r="7" fill="#1f2430"/>
+  <!-- page -->
+  <rect x="112" y="112" width="100" height="112" rx="8" fill="#fff8e6"/>
+  <g stroke="#ff5a28" stroke-width="6" stroke-linecap="round">
+    <line x1="130" y1="140" x2="190" y2="140"/>
+    <line x1="130" y1="162" x2="180" y2="162"/>
+    <line x1="130" y1="184" x2="192" y2="184"/>
+  </g>
+  <!-- crop corners -->
+  <g fill="none" stroke="#ffc400" stroke-width="8" stroke-linecap="round">
+    <path d="M120 122 h16 M120 122 v16"/>
+    <path d="M204 122 h-16 M204 122 v16"/>
+    <path d="M120 216 h16 M120 216 v-16"/>
+    <path d="M204 216 h-16 M204 216 v-16"/>
+  </g>
+</svg>

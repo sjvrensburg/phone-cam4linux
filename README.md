@@ -52,15 +52,21 @@ mirroring, audio, or input control.
 
 ## Install
 
-**Release archive** (x86_64 Linux with glibc 2.38 or newer -- Ubuntu 24.04, Fedora 39,
-Debian 13 and later -- and a CPU with AVX2, both requirements of the built-in model's
-prebuilt ONNX Runtime): download `pc4l-<version>-x86_64-linux.tar.gz` from the
-[releases page](https://github.com/sjvrensburg/phone-cam4linux/releases) and extract
-it anywhere; it contains `pc4l`, `pc4l-gui`, the `libwebgpu_dawn.so` the GUI's GPU path
-needs (found next to the binary), and `contrib/`. The built-in models (~780 MB:
-transcription and block detection) are fetched on first use, or extract
-`pc4l-models-<version>.tar.gz` from the same release into the same directory to have
-them offline (`models/` beside the binaries). `SHA256SUMS.txt` covers both archives.
+**AppImage** (x86_64 Linux with glibc 2.38 or newer -- Ubuntu 24.04, Fedora 39, Debian
+13 and later -- and a CPU with AVX2, both requirements of the built-in models' prebuilt
+ONNX Runtime; `adb` installed): download `pc4l-gui-<version>-x86_64.AppImage` from the
+[releases page](https://github.com/sjvrensburg/phone-cam4linux/releases), `chmod +x`,
+run. It carries the GUI, the CLI and the GPU provider; the built-in models (~780 MB)
+are fetched on first use into `~/.cache/pc4l/models/`, or extract
+`pc4l-models-<version>.tar.gz` next to the AppImage (a `models/` directory beside it)
+to have them offline. A desktop entry and icon are in `contrib/appimage/` (or let an
+AppImage launcher such as AppImageLauncher integrate it).
+
+**Release archive** (same requirements): `pc4l-<version>-x86_64-linux.tar.gz` contains
+`pc4l`, `pc4l-gui`, the `libwebgpu_dawn.so` the GUI's GPU path needs (found next to the
+binary), and `contrib/`. Extract `pc4l-models-<version>.tar.gz` into the same directory
+for the models offline (`models/` beside the binaries). `SHA256SUMS.txt` covers
+everything. `contrib/appimage/build.sh` builds the AppImage from a release build.
 
 **From source**:
 
@@ -187,8 +193,8 @@ turns it off, picks the device, and sets the score threshold (0.4: handwriting s
 lower than the printed pages it was trained on).
 
 The built-in models' files (~658 MB for GLM-OCR, 130 MB for the layout model) are not
-inside the binary. Each is looked for in `$PC4L_MODEL_DIR/<name>/`, then
-`models/<name>/` next to the executable (how a release tarball can ship them), then
+inside the binary. Each is looked for in `$PC4L_MODEL_DIR/<name>/`, then `models/<name>/` next to the AppImage or the
+executable (how a release can ship them), then
 `~/.cache/pc4l/models/<name>/` (`glm-ocr-onnx-q4f16`, `pp-doclayoutv3-onnx`); if
 none has it, it is downloaded there on first run from a pinned Hugging Face revision,
 each file verified against a sha256 compiled into the app, with progress shown in the

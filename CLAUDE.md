@@ -49,7 +49,11 @@ Exercise the whole V4L2 sink path with **no phone attached**:
 ubuntu-24.04 (the prebuilt ONNX Runtime needs glibc 2.38), packages them with the
 dereferenced `libwebgpu_dawn.so`, docs and `contrib/`, builds the models archive with
 `pc4l-gui --fetch-model` (so it carries the in-binary checksums), and publishes a
-GitHub release with `SHA256SUMS.txt`. Cut one with
+GitHub release with `SHA256SUMS.txt`, plus the AppImage from
+`contrib/appimage/build.sh` (appimagetool 1.9.1, sha256-pinned; AppDir = the two
+binaries + `libwebgpu_dawn.so` in `usr/bin`, the `.desktop` and SVG icon from
+`contrib/appimage/`; models are looked for in `models/` next to the AppImage via
+`$APPIMAGE`). Cut one with
 `git tag vX.Y.Z && git push --tags` after bumping `[workspace.package].version`.
 `LICENSE` is Apache-2.0 and `NOTICE` lists third-party terms -- keep it current when a
 component is added (a model, a runtime, ported code).
@@ -142,7 +146,8 @@ min-area rect gives the quad, as PaddleX does; `suppress_overlaps` is the
 cross-class NMS PaddleX also runs, since the model reports the same lines twice at
 times), `local/models.rs` finds or downloads
 each model's files (pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR/<name>/`,
-exe-adjacent `models/<name>/`, then `~/.cache/pc4l/models/<name>/`), and
+`models/<name>/` beside `$APPIMAGE`, exe-adjacent `models/<name>/`, then
+`~/.cache/pc4l/models/<name>/`), and
 `local/mod.rs` holds the one process-wide `ort` environment (`ort` refuses a second)
 and wraps GLM-OCR as a `Transcriber` that prepares on a thread, plus `RUNTIME`, the
 one lock every session load and run takes: the WebGPU EP segfaults on concurrent

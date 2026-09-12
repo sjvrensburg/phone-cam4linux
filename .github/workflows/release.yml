@@ -2,6 +2,7 @@ name: Release
 
 # Tag `vX.Y.Z` -> a GitHub release with:
 #   pc4l-vX.Y.Z-x86_64-linux.tar.gz    pc4l, pc4l-gui, libwebgpu_dawn.so, docs, contrib/
+#   pc4l-gui-vX.Y.Z-x86_64.AppImage    the GUI as one file (contrib/appimage/build.sh)
 #   pc4l-models-vX.Y.Z.tar.gz          the built-in models (~780 MB), extract to models/
 # Extracting both into one directory gives pc4l-gui the models beside the binary, with no
 # download at first run. The model archive is built by the binary's own --fetch-model, so it
@@ -66,6 +67,20 @@ jobs:
           echo "archive=dist/${name}.tar.gz" >> "$GITHUB_OUTPUT"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
 
+      - name: Build AppImage
+        id: appimage
+        env:
+          # appimagetool is itself an AppImage; the runner has no FUSE.
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          curl -fsSL -o appimagetool \
+            https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+          echo "ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0  appimagetool" | sha256sum -c
+          chmod +x appimagetool
+          out=$(APPIMAGETOOL="$PWD/appimagetool" contrib/appimage/build.sh dist | tail -1)
+          echo "file=${out}" >> "$GITHUB_OUTPUT"
+          rm appimagetool
+
       - name: Package models
         id: model
         env:
@@ -80,7 +95,7 @@ jobs:
       - name: Checksums
         run: |
           cd dist
-          sha256sum *.tar.gz > SHA256SUMS.txt
+          sha256sum *.tar.gz *.AppImage > SHA256SUMS.txt
           cat SHA256SUMS.txt
 
       - name: Smoke test the archive
@@ -88,11 +103,13 @@ jobs:
           mkdir -p /tmp/smoke && tar -C /tmp/smoke -xzf "${{ steps.pkg.outputs.archive }}"
           /tmp/smoke/${{ steps.pkg.outputs.name }}/pc4l --version
           /tmp/smoke/${{ steps.pkg.outputs.name }}/pc4l-gui --help > /dev/null
+          APPIMAGE_EXTRACT_AND_RUN=1 "${{ steps.appimage.outputs.file }}" --help > /dev/null
 
       - uses: softprops/action-gh-release@v2
         with:
           files: |
             ${{ steps.pkg.outputs.archive }}
+            ${{ steps.appimage.outputs.file }}
             ${{ steps.model.outputs.archive }}
             dist/SHA256SUMS.txt
           generate_release_notes: true
