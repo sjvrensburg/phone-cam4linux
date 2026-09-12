@@ -240,12 +240,28 @@ impl Default for LayoutConfig {
     }
 }
 
+/// The window itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct UiConfig {
+    /// Everything in the window scaled by this (1.0 = the desktop's own size).
+    pub scale: f32,
+}
+
+impl Default for UiConfig {
+    fn default() -> Self {
+        Self { scale: 1.0 }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default)]
     pub backends: Vec<BackendConfig>,
     #[serde(default)]
     pub layout: LayoutConfig,
+    #[serde(default)]
+    pub ui: UiConfig,
 }
 
 impl Config {
@@ -279,11 +295,25 @@ impl Config {
         }
     }
 
+    /// Writes the file; the Settings window's Save.
+    pub fn save(&self) -> Result<()> {
+        let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)?;
+        }
+        std::fs::write(&path, self.text()).with_context(|| format!("writing {}", path.display()))
+    }
+
     fn default_text() -> String {
+        Self::default().text()
+    }
+
+    fn text(&self) -> String {
         format!(
-            "# pc4l-gui transcription backends. Each [[backends]] entry is one choice in the\n\
-             # window; the first is selected at startup. [layout] is the block detector.\n\n{}",
-            toml::to_string_pretty(&Self::default()).expect("default config serialises")
+            "# pc4l-gui settings: edit here or in the window's Settings. Each [[backends]]\n\
+             # entry is one choice in the window; the first is selected at startup.\n\
+             # [layout] is the block detector, [ui] the window.\n\n{}",
+            toml::to_string_pretty(self).expect("config serialises")
         )
     }
 }
@@ -315,6 +345,7 @@ impl Default for Config {
                 },
             ],
             layout: LayoutConfig::default(),
+            ui: UiConfig::default(),
         }
     }
 }

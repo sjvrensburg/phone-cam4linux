@@ -14,8 +14,9 @@
 //! crop's corners can be dragged, so a block is a starting point, not a verdict.
 
 use crate::layout::{self, Block, BlockDetector, Quad};
+use crate::settings;
 use crate::stream::{Shared, Status, Worker};
-use crate::transcribe::{Mode, Transcriber, Transcription};
+use crate::transcribe::{BackendConfig, Config, LayoutConfig, Mode, Transcriber, Transcription};
 use egui::{
     Color32, ColorImage, FontId, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextureHandle,
     TextureOptions, Vec2,
@@ -189,6 +190,10 @@ struct ResultEntry {
     typeset: HashMap<usize, Typeset>,
 }
 
+/// Builds the block detector for a layout config; `None` when the build has none or
+/// it is disabled.
+pub type DetectorFactory = Box<dyn Fn(&LayoutConfig) -> Option<Arc<dyn BlockDetector>>>;
+
 /// What a results list belongs to.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ResultsScope {
@@ -360,8 +365,17 @@ pub struct App {
     /// View size the crop was drawn against; a different frame size (camera switch)
     /// invalidates it.
     crop_space: Option<(usize, usize)>,
+    /// The configuration in force, and the backends built from it (`backend_configs`
+    /// says which config each one came from, so a Save can keep the unchanged ones
+    /// -- the local model is not reloaded for an edit elsewhere).
+    config: Config,
+    backend_configs: Vec<BackendConfig>,
     backends: Vec<Arc<dyn Transcriber>>,
     selected_backend: usize,
+    detector_factory: DetectorFactory,
+    /// The Settings window's draft while it is open.
+    draft: Option<Config>,
+    settings_open: bool,
     /// For waking the UI from the read thread; set on the first frame.
     ctx: Option<egui::Context>,
     pending: Option<PendingRead>,
@@ -370,6 +384,8 @@ pub struct App {
     typesetter: Option<Arc<dyn Typesetter>>,
     /// Show readings typeset (maths rendered) rather than as raw text.
     typeset_on: bool,
+    /// The zoom factor the typeset textures were rendered for.
+    last_zoom: Option<f32>,
     /// What `results` were read from; they are dropped when a read of something
     /// else starts or the capture goes.
     results_key: Option<(Arc<YuvFrame>, ResultsScope)>,
@@ -404,12 +420,12 @@ impl App {
     pub fn new(
         worker: Worker,
         save_dir: PathBuf,
-        backends: Vec<Arc<dyn Transcriber>>,
-        detector: Option<Arc<dyn BlockDetector>>,
+        config: Config,
+        detector_factory: DetectorFactory,
         typesetter: Option<Arc<dyn Typesetter>>,
         screenshot: Option<(Duration, PathBuf)>,
     ) -> Self {
-        Self {
+        let mut app = Self {
             worker,
             preview: View::new("preview"),
             crop_view: View::new("crop"),
@@ -424,15 +440,24 @@ impl App {
             message: None,
             fps: FpsCounter::default(),
             crop_space: None,
-            backends,
+            config: Config {
+                backends: Vec::new(),
+                ..config.clone()
+            },
+            backend_configs: Vec::new(),
+            backends: Vec::new(),
             selected_backend: 0,
+            detector_factory,
+            draft: None,
+            settings_open: false,
             ctx: None,
             pending: None,
             results: Vec::new(),
             typesetter: typesetter.clone(),
             typeset_on: typesetter.is_some(),
+            last_zoom: None,
             results_key: None,
-            detector,
+            detector: None,
             blocks: Vec::new(),
             blocks_key: None,
             selected_block: None,
@@ -445,6 +470,106 @@ impl App {
             dev_read_all: false,
             dev_zoom: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
+        };
+        app.apply_config(config, true);
+        app
+    }
+
+    /// Puts `new` in force: backends whose entry did not change are kept (a local
+    /// model stays loaded), the rest are built; the detector is rebuilt if its
+    /// section changed; the scale is applied once the window exists.
+    fn apply_config(&mut self, new: Config, first: bool) {
+        let mut backends = Vec::new();
+        let mut configs = Vec::new();
+        for b in &new.backends {
+            let existing = self
+                .backend_configs
+                .iter()
+                .position(|c| c == b)
+                .map(|i| Arc::clone(&self.backends[i]));
+            let built = existing.or_else(|| b.build().map(Into::into));
+            if let Some(t) = built {
+                backends.push(t);
+                configs.push(b.clone());
+            }
+        }
+        let selected_name = self
+            .backends
+            .get(self.selected_backend)
+            .map(|b| b.name().to_string());
+        self.backends = backends;
+        self.backend_configs = configs;
+        self.selected_backend = selected_name
+            .and_then(|n| self.backends.iter().position(|b| b.name() == n))
+            .unwrap_or(0);
+        if first || new.layout != self.config.layout {
+            self.detector = (self.detector_factory)(&new.layout);
+            if self.detector.is_none() {
+                self.block_mode = false;
+            }
+        }
+        if let Some(ctx) = &self.ctx {
+            ctx.set_zoom_factor(new.ui.scale);
+        }
+        self.config = new;
+    }
+
+    /// The Settings window, when open. The draft's scale is applied live.
+    fn settings_window(&mut self, ctx: &egui::Context) {
+        if !self.settings_open {
+            return;
+        }
+        let mut draft = self.draft.take().unwrap_or_else(|| self.config.clone());
+        let action = settings::show(ctx, &mut self.settings_open, &mut draft);
+        match action {
+            settings::Action::None => {
+                if (ctx.zoom_factor() - draft.ui.scale).abs() > 1e-3 {
+                    ctx.set_zoom_factor(draft.ui.scale);
+                }
+                self.draft = Some(draft);
+            }
+            settings::Action::Save => {
+                match draft.save() {
+                    Ok(()) => self.say(format!("settings saved to {}", Config::path().display())),
+                    Err(e) => self.say(format!("saving settings failed: {e:#}")),
+                }
+                self.apply_config(draft, false);
+                self.draft = None;
+                self.settings_open = false;
+            }
+            settings::Action::Cancel => {
+                ctx.set_zoom_factor(self.config.ui.scale);
+                self.draft = None;
+                self.settings_open = false;
+            }
+        }
+    }
+
+    /// egui's own ctrl+plus / ctrl+minus / ctrl+0 change the zoom too: keep the
+    /// config in step (and on disk) so the next start looks the same, and drop the
+    /// typeset textures, which were rendered for the old pixel density.
+    fn track_zoom(&mut self, ctx: &egui::Context) {
+        let zoom = ctx.zoom_factor();
+        let shown = self
+            .draft
+            .as_ref()
+            .map_or(self.config.ui.scale, |d| d.ui.scale);
+        if (zoom - shown).abs() > 1e-3 {
+            match &mut self.draft {
+                Some(d) => d.ui.scale = zoom,
+                None => {
+                    self.config.ui.scale = zoom;
+                    if let Err(e) = self.config.save() {
+                        log::warn!("saving the window scale: {e:#}");
+                    }
+                }
+            }
+        }
+        if self.last_zoom != Some(zoom) {
+            self.last_zoom = Some(zoom);
+            for entry in &mut self.results {
+                entry.typeset.clear();
+            }
         }
     }
 
@@ -454,6 +579,10 @@ impl App {
 
     pub fn set_dev_read(&mut self, on: bool) {
         self.dev_read = on;
+    }
+
+    pub fn set_settings_open(&mut self, open: bool) {
+        self.settings_open = open;
     }
 
     /// Starts in block mode, optionally reading every block once there are some.
@@ -935,7 +1064,8 @@ impl App {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
+        // Wrapped: at a larger window scale the row overflows otherwise.
+        ui.horizontal_wrapped(|ui| {
             let live = self.captured.is_none();
             let label = if live {
                 "Capture  [space]"
@@ -990,6 +1120,14 @@ impl App {
                 self.shared().restart();
             }
             self.zoom_control(ui);
+            ui.separator();
+            if ui
+                .button("Settings  [ctrl+,]")
+                .on_hover_text("window scale, backends, block detector")
+                .clicked()
+            {
+                self.settings_open = !self.settings_open;
+            }
         });
     }
 
@@ -1001,26 +1139,34 @@ impl App {
         };
         ui.separator();
         if hi > lo {
-            ui.label("Zoom:");
-            let mut value = self.shared().zoom();
-            let slider = ui.add(
-                egui::Slider::new(&mut value, lo.max(1.0)..=hi)
-                    .logarithmic(true)
-                    .suffix("x")
-                    .fixed_decimals(2),
-            );
-            if slider.changed() {
-                self.go_live();
-                self.shared().set_zoom(value);
+            // One unit, moved to the next row whole when the wrapped toolbar is
+            // short of room (a nested row does not wrap by itself).
+            if ui.available_rect_before_wrap().width() < 330.0 {
+                ui.end_row();
             }
-            if ui
-                .button("1x  [0]")
-                .on_hover_text("reset the phone's zoom")
-                .clicked()
-            {
-                self.go_live();
-                self.shared().set_zoom(1.0);
-            }
+            ui.horizontal(|ui| {
+                ui.label("Zoom:");
+                ui.spacing_mut().slider_width = 120.0;
+                let mut value = self.shared().zoom();
+                let slider = ui.add(
+                    egui::Slider::new(&mut value, lo.max(1.0)..=hi)
+                        .logarithmic(true)
+                        .suffix("x")
+                        .fixed_decimals(2),
+                );
+                if slider.changed() {
+                    self.go_live();
+                    self.shared().set_zoom(value);
+                }
+                if ui
+                    .button("1x  [0]")
+                    .on_hover_text("reset the phone's zoom")
+                    .clicked()
+                {
+                    self.go_live();
+                    self.shared().set_zoom(1.0);
+                }
+            });
         }
         let mut torch = self.shared().torch();
         if ui.checkbox(&mut torch, "Torch").changed() {
@@ -1517,6 +1663,9 @@ impl App {
         if detect {
             self.toggle_block_mode();
         }
+        if ctx.input(|i| i.modifiers.command && i.key_pressed(Key::Comma)) {
+            self.settings_open = !self.settings_open;
+        }
         if tab != 0 {
             self.step_block(tab);
         }
@@ -1634,7 +1783,10 @@ impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         if self.ctx.is_none() {
             self.ctx = Some(ui.ctx().clone());
+            ui.ctx().set_zoom_factor(self.config.ui.scale);
         }
+        self.track_zoom(ui.ctx());
+        self.settings_window(ui.ctx());
         self.fps.tick(self.shared().frames());
         self.handle_keys(ui.ctx());
         self.handle_screenshot(ui.ctx());

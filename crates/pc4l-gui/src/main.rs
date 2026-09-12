@@ -8,6 +8,7 @@ mod layout;
 mod local;
 #[cfg(feature = "math")]
 mod mathtext;
+mod settings;
 mod stream;
 mod transcribe;
 
@@ -97,6 +98,10 @@ struct Args {
     /// frame arrives.
     #[arg(long, hide = true)]
     dev_read: bool,
+
+    /// Development aid: start with the Settings window open.
+    #[arg(long, hide = true)]
+    dev_settings: bool,
 
     /// Development aid: detect blocks as soon as the detector and a frame are ready.
     #[arg(long, hide = true)]
@@ -230,6 +235,7 @@ fn main() -> Result<()> {
         .transpose()?;
     let dev_read = args.dev_read;
     let dev_detect = args.dev_detect;
+    let dev_settings = args.dev_settings;
     let dev_read_all = args.dev_read_all;
     let dev_zoom = args.dev_zoom;
     let screenshot = args
@@ -237,28 +243,24 @@ fn main() -> Result<()> {
         .zip(args.screenshot_path)
         .map(|(secs, path)| (std::time::Duration::from_secs_f32(secs), path));
 
-    let backend_config = transcribe::Config::load_or_create().unwrap_or_else(|e| {
+    let gui_config = transcribe::Config::load_or_create().unwrap_or_else(|e| {
         log::error!("{e:#}; no transcription backends available");
         transcribe::Config {
             backends: Vec::new(),
             ..Default::default()
         }
     });
-    let backends: Vec<std::sync::Arc<dyn transcribe::Transcriber>> = backend_config
-        .backends
-        .iter()
-        .filter_map(|b| b.build().map(Into::into))
-        .collect();
     #[cfg(feature = "local-model")]
-    let detector: Option<std::sync::Arc<dyn layout::BlockDetector>> =
-        backend_config.layout.enabled.then(|| {
+    let detector_factory: app::DetectorFactory = Box::new(|layout| {
+        layout.enabled.then(|| {
             std::sync::Arc::new(local::layout::LayoutService::new(
-                backend_config.layout.device,
-                backend_config.layout.threshold,
+                layout.device,
+                layout.threshold,
             )) as _
-        });
+        })
+    });
     #[cfg(not(feature = "local-model"))]
-    let detector: Option<std::sync::Arc<dyn layout::BlockDetector>> = None;
+    let detector_factory: app::DetectorFactory = Box::new(|_| None);
     #[cfg(feature = "math")]
     let typesetter: Option<std::sync::Arc<dyn app::Typesetter>> =
         Some(std::sync::Arc::new(mathtext::Renderer::new()));
@@ -277,12 +279,19 @@ fn main() -> Result<()> {
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();
             let worker = Worker::start(config, move || ctx.request_repaint());
-            let mut app =
-                app::App::new(worker, save_dir, backends, detector, typesetter, screenshot);
+            let mut app = app::App::new(
+                worker,
+                save_dir,
+                gui_config,
+                detector_factory,
+                typesetter,
+                screenshot,
+            );
             app.set_rotation(rotation);
             app.set_crop(dev_crop);
             app.set_dev_read(dev_read);
             app.set_dev_detect(dev_detect, dev_read_all);
+            app.set_settings_open(dev_settings);
             app.set_dev_zoom(dev_zoom);
             Ok(Box::new(app))
         }),

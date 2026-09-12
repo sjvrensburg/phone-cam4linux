@@ -105,12 +105,16 @@ systemd user unit.
 the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 *view* (rotated) coordinates mapped back to the source frame, capture, save;
 `transcribe.rs`: the `Transcriber` trait, the OpenAI-compatible and halo-workbench
-`/hint/read` backends, and the `~/.config/pc4l/gui.toml` backend list (plus the
-`[layout]` section) -- prompts are verbatim from halo-workbench's `handwriting.py`,
+`/hint/read` backends, and the `~/.config/pc4l/gui.toml` `Config` (backend list,
+`[layout]`, `[ui] scale`) -- prompts are verbatim from halo-workbench's `handwriting.py`,
 readings are grouped and counted, never merged; `layout.rs`: the `BlockDetector`
 trait, `Block`/`Quad` in view space and the perspective `rectify` (imageproc) a
 non-rectangular block goes through before it is shown or read -- feature-independent
-so the window builds without a detector; `mathtext.rs` (feature `math`): readings
+so the window builds without a detector; `settings.rs`: the Settings window editing
+a draft `Config`, applied by `App::apply_config` (backends whose entry is unchanged
+are kept, so the local model is not reloaded; the detector is rebuilt through the
+`DetectorFactory` main.rs passes in; the scale is egui's zoom factor, tracked back
+into the config when egui's own ctrl+plus/minus change it); `mathtext.rs` (feature `math`): readings
 typeset by Typst -- `$…$`/`$$…$$`/`\(…\)`/`\[…\]` segments converted by the `mitex`
 crate and evaluated inside MiTeX's Typst scope (vendored under `assets/mitex/`, so
 `\operatorname` and friends resolve), the rest escaped as markup, rasterised by
@@ -141,7 +145,7 @@ the WebGPU provider is a separate `libwebgpu_dawn.so` that lands next to the bin
 (as a symlink into `~/.cache/dfbin` -- copy the real file into a release tarball),
 found via the `$ORIGIN` rpath from `build.rs`. `--no-default-features` builds without
 any of this. The hidden `--screenshot-after SECS --screenshot-path FILE`,
-`--dev-crop X,Y,W,H`, `--dev-read`, `--dev-detect` and `--dev-read-all` flags let you
+`--dev-crop X,Y,W,H`, `--dev-read`, `--dev-detect`, `--dev-read-all` and `--dev-settings` flags let you
 drive it from a script (GNOME blocks external screenshots of the window);
 `XDG_CONFIG_HOME` points it at a scratch backend config.
 

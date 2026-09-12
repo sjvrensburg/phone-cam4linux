@@ -34,7 +34,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Tag builds are not on the default branch, so the cache must be told to save;
+      # one shared key keeps every release warm (Typst alone is minutes of compile).
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release
+          save-if: true
 
       - name: Fetch scrcpy-server jar
         run: |
