@@ -141,6 +141,7 @@ impl Drop for Worker {
 fn run_loop(shared: &Arc<Shared>, wake: &dyn Fn()) {
     const MIN_BACKOFF: Duration = Duration::from_secs(1);
     const MAX_BACKOFF: Duration = Duration::from_secs(10);
+    const RESTART_GRACE: Duration = Duration::from_millis(1500);
 
     let mut backoff = MIN_BACKOFF;
     let mut tee: Option<V4l2Sink> = None;
@@ -155,6 +156,14 @@ fn run_loop(shared: &Arc<Shared>, wake: &dyn Fn()) {
             break;
         }
         if shared.restart.load(Ordering::Relaxed) {
+            // The phone releases the camera a moment after the server goes; opening
+            // the other camera straight away fails with "device is in the error state".
+            shared.set_status(Status::Waiting {
+                reason: "switching camera".to_string(),
+                retry_at: Instant::now() + RESTART_GRACE,
+            });
+            wake();
+            sleep_unless(RESTART_GRACE, || shared.stop.load(Ordering::Relaxed));
             continue;
         }
         let reason = match outcome {

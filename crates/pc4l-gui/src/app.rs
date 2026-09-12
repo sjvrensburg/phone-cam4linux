@@ -159,6 +159,9 @@ pub struct App {
     save_dir: PathBuf,
     message: Option<(String, Instant)>,
     fps: FpsCounter,
+    /// View size the crop was drawn against; a different frame size (camera switch)
+    /// invalidates it.
+    crop_space: Option<(usize, usize)>,
     /// Development aid: write a screenshot of the window to this path after the
     /// delay, then quit.
     screenshot: Option<(Duration, PathBuf, Instant)>,
@@ -177,6 +180,7 @@ impl App {
             save_dir,
             message: None,
             fps: FpsCounter::default(),
+            crop_space: None,
             screenshot: screenshot.map(|(after, path)| (after, path, Instant::now())),
         }
     }
@@ -326,7 +330,6 @@ impl App {
     /// it and drag-to-select. Coordinates here are view space.
     fn preview_panel(&mut self, ui: &mut egui::Ui, frame: &Arc<YuvFrame>) {
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
-        self.crop = self.crop.and_then(|c| c.clamped(vw, vh));
         let step = vw.max(vh).div_ceil(PREVIEW_MAX_EDGE).max(1);
         self.preview
             .update(ui.ctx(), frame, Crop::whole(vw, vh), step, self.rotation);
@@ -525,6 +528,17 @@ impl eframe::App for App {
             });
             return;
         };
+
+        // The crop must fit the frame about to be drawn: frames change size when the
+        // camera is switched, and a stale box would index outside the new frame.
+        let view = self.rotation.rotated_size(frame.width, frame.height);
+        if self.crop_space != Some(view) {
+            if self.crop_space.is_some() {
+                self.crop = None;
+            }
+            self.crop_space = Some(view);
+        }
+        self.crop = self.crop.and_then(|c| c.clamped(view.0, view.1));
 
         let side = ui.available_width() * 0.4;
         egui::Panel::right("crop")
