@@ -778,10 +778,11 @@ impl App {
         let (tx, rx) = mpsc::sync_channel(1);
         let ctx = self.ctx.clone();
         let name = backend.name().to_string();
+        let prompt = self.config.prompts.for_mode(mode).to_string();
         std::thread::Builder::new()
             .name("pc4l-read".into())
             .spawn(move || {
-                let result = backend.read(&png, mode, (vw as u32, vh as u32));
+                let result = backend.read(&png, mode, &prompt, (vw as u32, vh as u32));
                 let _ = tx.send(result);
                 if let Some(ctx) = ctx {
                     ctx.request_repaint();

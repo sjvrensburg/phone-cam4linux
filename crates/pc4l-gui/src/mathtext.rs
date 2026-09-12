@@ -21,8 +21,70 @@ const TEMPLATE: &str = r#"
 #set page(width: inputs.width * 1pt, height: auto, margin: 3pt, fill: none)
 #set text(size: inputs.size * 1pt, fill: rgb(inputs.color))
 #set par(leading: 0.5em)
-#eval(inputs.src, mode: "markup", scope: mitex-scope)
+#let compat = (hbar: symbol("ℏ"))
+#eval(inputs.src, mode: "markup", scope: mitex-scope + compat)
 "#;
+
+/// Symbol names the `mitex` crate's built-in spec (older than Typst 0.15) emits
+/// that Typst has since renamed, with what they are called now. Applied to whole
+/// dotted tokens: an entry matches the token or a prefix of it up to a dot. Found
+/// by pushing every command in MiTeX's spec through both.
+const RENAMES: &[(&str, &str)] = &[
+    ("diff", "partial"),
+    ("sect", "inter"),
+    ("ohm", "Omega"),
+    ("dot.circle", "dot.o"),
+    ("plus.circle", "plus.o"),
+    ("times.circle", "times.o"),
+    ("minus.circle", "minus.o"),
+    ("ast.circle", "convolve.o"),
+    ("dash.circle", "dash.o"),
+    ("circle.nested", "compose.o"),
+    ("planck.reduce", "hbar"),
+    ("angle.l", "chevron.l"),
+    ("angle.r", "chevron.r"),
+    ("bracket.l.double", "bracket.l.stroked"),
+    ("bracket.r.double", "bracket.r.stroked"),
+    ("arrow.l.dash", "arrow.l.dashed"),
+    ("arrow.r.dash", "arrow.r.dashed"),
+];
+
+/// Rewrites renamed symbols in converted math, token by token (a token is a run of
+/// letters, digits and dots).
+fn modernise(math: &str) -> String {
+    let mut out = String::with_capacity(math.len());
+    let mut token = String::new();
+    let flush = |token: &mut String, out: &mut String| {
+        if token.is_empty() {
+            return;
+        }
+        let mut replaced = None;
+        for (old, new) in RENAMES {
+            if token == old {
+                replaced = Some(new.to_string());
+                break;
+            }
+            if let Some(rest) = token.strip_prefix(old) {
+                if rest.starts_with('.') {
+                    replaced = Some(format!("{new}{rest}"));
+                    break;
+                }
+            }
+        }
+        out.push_str(&replaced.unwrap_or_else(|| token.clone()));
+        token.clear();
+    };
+    for c in math.chars() {
+        if c.is_ascii_alphanumeric() || c == '.' {
+            token.push(c);
+        } else {
+            flush(&mut token, &mut out);
+            out.push(c);
+        }
+    }
+    flush(&mut token, &mut out);
+    out
+}
 
 pub struct Renderer {
     engine: TypstEngine<TypstTemplateCollection>,
@@ -152,7 +214,7 @@ fn line_to_typst(line: &str, out: &mut String) {
         match after.find(close) {
             Some(end) => {
                 let tex = &after[..end];
-                match mitex::convert_math(tex, None) {
+                match mitex::convert_math(tex, None).map(|m| modernise(&m)) {
                     Ok(math) if !tex.trim().is_empty() => {
                         if display {
                             out.push_str(&format!("$ {math} $"));
@@ -250,6 +312,25 @@ mod tests {
     fn list_markers_are_escaped_only_at_line_start() {
         let t = to_typst("- a - b\n= c");
         assert_eq!(t, "\\- a - b \\\n\\= c");
+    }
+
+    #[test]
+    fn renamed_symbols_are_modernised() {
+        assert_eq!(
+            modernise("frac(diff l ,diff w )"),
+            "frac(partial l ,partial w )"
+        );
+        assert_eq!(modernise("A sect.big B"), "A inter.big B");
+        assert_eq!(modernise("differential"), "differential");
+        assert_eq!(modernise("x plus.circle.big y"), "x plus.o.big y");
+    }
+
+    #[test]
+    fn a_page_with_partials_cases_and_operators_renders() {
+        let text = "1) cases when $y_i \\neq y_j$\n$$\\frac{\\partial l}{\\partial w} = \\begin{cases} -x & \\text{if } wx+b < 0 \\\\ x & \\text{if } wx+b > 0 \\end{cases}$$\n$$w_{i.e.} = \\pi \\operatorname{sign}(wx+b)x; \\hbar \\oplus \\langle x \\rangle$$";
+        let r = Renderer::new();
+        let out = r.render(text, 300.0, 12.0, 1.0, [0, 0, 0]).unwrap();
+        assert!(out.image.height() > 40);
     }
 
     #[test]

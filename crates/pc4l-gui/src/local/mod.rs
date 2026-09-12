@@ -166,7 +166,13 @@ impl Transcriber for LocalBackend {
         }
     }
 
-    fn read(&self, png: &[u8], mode: Mode, _capture_px: (u32, u32)) -> Result<Transcription> {
+    fn read(
+        &self,
+        png: &[u8],
+        _mode: Mode,
+        prompt: &str,
+        _capture_px: (u32, u32),
+    ) -> Result<Transcription> {
         let started = Instant::now();
         let img = image::load_from_memory(png)
             .context("decoding the crop")?
@@ -179,7 +185,7 @@ impl Transcriber for LocalBackend {
         };
         let out = {
             let _turn = runtime_turn();
-            model.generate(&img, mode.prompt(), self.max_tokens)?
+            model.generate(&img, prompt, self.max_tokens)?
         };
         let (readings, silent) = if out.text.is_empty() {
             (Vec::new(), 1)

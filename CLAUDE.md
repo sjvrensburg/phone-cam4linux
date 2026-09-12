@@ -106,7 +106,9 @@ the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 *view* (rotated) coordinates mapped back to the source frame, capture, save;
 `transcribe.rs`: the `Transcriber` trait, the OpenAI-compatible and halo-workbench
 `/hint/read` backends, and the `~/.config/pc4l/gui.toml` `Config` (backend list,
-`[layout]`, `[ui] scale`) -- prompts are verbatim from halo-workbench's `handwriting.py`,
+`[layout]`, `[prompts]`, `[ui] scale`) -- the default prompts are verbatim from
+halo-workbench's `handwriting.py` and travel with each read (`Transcriber::read`
+takes the prompt; the hint API ignores it),
 readings are grouped and counted, never merged; `layout.rs`: the `BlockDetector`
 trait, `Block`/`Quad` in view space and the perspective `rectify` (imageproc) a
 non-rectangular block goes through before it is shown or read -- feature-independent
@@ -119,7 +121,11 @@ typeset by Typst -- `$…$`/`$$…$$`/`\(…\)`/`\[…\]` segments converted by 
 crate and evaluated inside MiTeX's Typst scope (vendored under `assets/mitex/`, so
 `\operatorname` and friends resolve), the rest escaped as markup, rasterised by
 `typst-render` at the window's pixel density and cached per reading as a texture
-(`app::Typeset`); a reading that fails to compile is shown as text; `local/`: the
+(`app::Typeset`); a reading that fails to compile is shown as text. The `mitex`
+crate's built-in spec predates Typst 0.15's symbol renames (`diff`→`partial`,
+`sect`→`inter`, `plus.circle`→`plus.o`, …), so `modernise` rewrites its output by
+the `RENAMES` table -- extend it when a reading fails with "unknown variable";
+`local/`: the
 built-in models --
 `local/glmocr.rs` drives the onnx-community three-graph GLM-OCR export through `ort`
 (vision encoder, embeddings, merged decoder with an explicit KV cache and the

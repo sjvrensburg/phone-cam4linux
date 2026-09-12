@@ -146,7 +146,9 @@ always copies the raw text, and anything that does not convert stays text. (The
 `math` cargo feature, on by default; about 40 MB of the binary.) Backends live in
 `~/.config/pc4l/gui.toml` (written with defaults on first run) and are edited in the
 window's **Settings** (`ctrl+,`) -- an OpenAI-compatible endpoint's URL, model and API
-key go there -- along with the block detector and the window **scale** (everything,
+key go there -- along with the **prompts** sent to the OpenAI-compatible and built-in
+backends (the defaults are the ones every model comparison was made with; the hint
+API keeps the workbench's own), the block detector and the window **scale** (everything,
 readings included; `ctrl+plus` / `ctrl+minus` / `ctrl+0` change it too and the value
 is remembered):
 

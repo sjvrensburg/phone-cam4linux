@@ -37,7 +37,8 @@ pub enum Mode {
 }
 
 impl Mode {
-    pub fn prompt(self) -> &'static str {
+    /// The prompt as shipped (the one every measurement was taken with).
+    pub fn default_prompt(self) -> &'static str {
         match self {
             Mode::Crop => CROP_PROMPT,
             Mode::Page => PAGE_PROMPT,
@@ -81,9 +82,17 @@ pub trait Transcriber: Send + Sync {
     fn status(&self) -> Option<String> {
         None
     }
-    /// `capture_px` is the size of the whole frame the crop was cut from, for
-    /// backends that warn about low-resolution captures.
-    fn read(&self, png: &[u8], mode: Mode, capture_px: (u32, u32)) -> Result<Transcription>;
+    /// `prompt` is the instruction for `mode` (the user's, or the default); a
+    /// backend that sets its own prompt (the hint API) ignores it. `capture_px` is
+    /// the size of the whole frame the crop was cut from, for backends that warn
+    /// about low-resolution captures.
+    fn read(
+        &self,
+        png: &[u8],
+        mode: Mode,
+        prompt: &str,
+        capture_px: (u32, u32),
+    ) -> Result<Transcription>;
 }
 
 // ---------------------------------------------------------------------------
@@ -240,6 +249,35 @@ impl Default for LayoutConfig {
     }
 }
 
+/// The instructions sent with an image. Sent by the OpenAI-compatible and built-in
+/// backends; the hint API has its own on the workbench side.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PromptsConfig {
+    /// For a boxed region (a word or a line).
+    pub crop: String,
+    /// For a whole page.
+    pub page: String,
+}
+
+impl Default for PromptsConfig {
+    fn default() -> Self {
+        Self {
+            crop: CROP_PROMPT.into(),
+            page: PAGE_PROMPT.into(),
+        }
+    }
+}
+
+impl PromptsConfig {
+    pub fn for_mode(&self, mode: Mode) -> &str {
+        match mode {
+            Mode::Crop => &self.crop,
+            Mode::Page => &self.page,
+        }
+    }
+}
+
 /// The window itself.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -260,6 +298,8 @@ pub struct Config {
     pub backends: Vec<BackendConfig>,
     #[serde(default)]
     pub layout: LayoutConfig,
+    #[serde(default)]
+    pub prompts: PromptsConfig,
     #[serde(default)]
     pub ui: UiConfig,
 }
@@ -312,7 +352,8 @@ impl Config {
         format!(
             "# pc4l-gui settings: edit here or in the window's Settings. Each [[backends]]\n\
              # entry is one choice in the window; the first is selected at startup.\n\
-             # [layout] is the block detector, [ui] the window.\n\n{}",
+             # [layout] is the block detector, [prompts] what the models are asked,\n\
+             # [ui] the window.\n\n{}",
             toml::to_string_pretty(self).expect("config serialises")
         )
     }
@@ -345,6 +386,7 @@ impl Default for Config {
                 },
             ],
             layout: LayoutConfig::default(),
+            prompts: PromptsConfig::default(),
             ui: UiConfig::default(),
         }
     }
@@ -383,7 +425,13 @@ impl Transcriber for OpenAiBackend {
         &self.name
     }
 
-    fn read(&self, png: &[u8], mode: Mode, _capture_px: (u32, u32)) -> Result<Transcription> {
+    fn read(
+        &self,
+        png: &[u8],
+        _mode: Mode,
+        prompt: &str,
+        _capture_px: (u32, u32),
+    ) -> Result<Transcription> {
         let started = Instant::now();
         // One sample is a greedy read; spread is only asked for when sampling.
         let temperature = if self.samples == 1 {
@@ -397,7 +445,7 @@ impl Transcriber for OpenAiBackend {
             "max_tokens": self.max_tokens,
             "messages": [{"role": "user", "content": [
                 {"type": "image_url", "image_url": {"url": data_url(png)}},
-                {"type": "text", "text": mode.prompt()},
+                {"type": "text", "text": prompt},
             ]}],
         });
         let agent = agent();
@@ -513,7 +561,13 @@ impl Transcriber for HintApiBackend {
         &self.name
     }
 
-    fn read(&self, png: &[u8], mode: Mode, capture_px: (u32, u32)) -> Result<Transcription> {
+    fn read(
+        &self,
+        png: &[u8],
+        mode: Mode,
+        _prompt: &str,
+        capture_px: (u32, u32),
+    ) -> Result<Transcription> {
         let started = Instant::now();
         let body = serde_json::json!({
             "member": self.member,

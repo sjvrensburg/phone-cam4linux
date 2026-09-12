@@ -3,7 +3,7 @@
 //! URL, model and key go here), and the block detector. Edits are made to a draft;
 //! Save writes the file and applies it, Cancel drops the draft.
 
-use crate::transcribe::{BackendConfig, Config, LocalDevice};
+use crate::transcribe::{BackendConfig, Config, LocalDevice, Mode};
 use egui::{ComboBox, DragValue, Slider, TextEdit};
 
 /// What the window asked for this frame.
@@ -129,6 +129,16 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Outcome
                     });
                     ui.add_space(8.0);
 
+                    ui.heading("Prompts");
+                    ui.weak(
+                        "What the OpenAI-compatible and built-in backends are asked. The hint \
+                         API sets its own on the workbench side. The defaults are the ones \
+                         every model comparison was made with.",
+                    );
+                    prompt_row(ui, "For a boxed region", &mut draft.prompts.crop, Mode::Crop);
+                    prompt_row(ui, "For a whole page", &mut draft.prompts.page, Mode::Page);
+                    ui.add_space(8.0);
+
                     ui.heading("Block detector");
                     ui.checkbox(&mut draft.layout.enabled, "Enabled (PP-DocLayoutV3)");
                     ui.horizontal(|ui| {
@@ -164,6 +174,20 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Outcome
         action,
         apply_scale,
     }
+}
+
+fn prompt_row(ui: &mut egui::Ui, label: &str, value: &mut String, mode: Mode) {
+    ui.horizontal(|ui| {
+        ui.label(label);
+        if *value != mode.default_prompt() && ui.small_button("reset to default").clicked() {
+            *value = mode.default_prompt().to_string();
+        }
+    });
+    ui.add(
+        TextEdit::multiline(value)
+            .desired_rows(3)
+            .desired_width(f32::INFINITY),
+    );
 }
 
 fn kind_name(b: &BackendConfig) -> &'static str {
