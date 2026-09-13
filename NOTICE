@@ -1,4 +1,4 @@
-phone-cam4linux
+Squigl
 Copyright 2026 Stefan Janse van Rensburg
 
 Licensed under the Apache License, Version 2.0 (see LICENSE).
@@ -30,41 +30,41 @@ FFmpeg (optional, `--features ffmpeg`) (https://ffmpeg.org)
 
 ONNX Runtime (https://github.com/microsoft/onnxruntime)
   Copyright Microsoft Corporation. MIT License.
-  Used by pc4l-gui's built-in transcription model (feature `local-model`, on by
+  Used by Squigl's built-in transcription model (feature `local-model`, on by
   default) through the `ort` crate (MIT/Apache-2.0), which downloads prebuilt
   ONNX Runtime binaries from pyke.io at build time (https://github.com/pykeio/ort).
 
 Dawn (https://dawn.googlesource.com/dawn)
   Copyright The Dawn & Tint Authors. BSD 3-Clause License.
   ONNX Runtime's WebGPU execution provider; shipped as libwebgpu_dawn.so next to
-  pc4l-gui in the release archives.
+  squigl in the release archives.
 
 GLM-OCR (https://huggingface.co/zai-org/GLM-OCR)
   Copyright Zhipu AI (Z.ai). MIT License.
   ONNX export: https://huggingface.co/onnx-community/GLM-OCR-ONNX (MIT License).
   Not included in the binaries: downloaded on first use into the user's cache
-  (SHA-256 verified against the manifest in crates/pc4l-gui/src/local/models.rs) or
+  (SHA-256 verified against the manifest in crates/squigl/src/local/models.rs) or
   shipped as a separate release archive.
 
 PP-DocLayoutV3 (https://huggingface.co/PaddlePaddle/PP-DocLayoutV3)
   Copyright PaddlePaddle Authors. Apache License 2.0.
   ONNX export: https://huggingface.co/PaddlePaddle/PP-DocLayoutV3_onnx (Apache-2.0).
   The block detector; fetched and shipped the same way as GLM-OCR. Its
-  post-processing in crates/pc4l-gui/src/local/layout.rs (instance mask -> polygon ->
+  post-processing in crates/squigl/src/local/layout.rs (instance mask -> polygon ->
   minimum-area quadrilateral) follows PaddleX's layout_analysis processors
   (https://github.com/PaddlePaddle/PaddleX, Apache-2.0).
 
 oar-ocr (https://github.com/GreatV/oar-ocr)
   Copyright Wang Xin and contributors. Apache License 2.0.
   The GLM-OCR image preprocessing ("smart resize" and patch ordering) and the
-  MRoPE position-id construction in crates/pc4l-gui/src/local/glmocr.rs are
+  MRoPE position-id construction in crates/squigl/src/local/glmocr.rs are
   ported from its oar-ocr-vl crate.
 
 Typst (https://github.com/typst/typst)
   Copyright the Typst contributors. Apache License 2.0.
   Typesets the readings (feature `math`, on by default) through the typst,
   typst-layout, typst-render and typst-as-lib crates. The fonts embedded via
-  typst-assets are shipped inside pc4l-gui: New Computer Modern (GUST Font License),
+  typst-assets are shipped inside squigl: New Computer Modern (GUST Font License),
   Libertinus (SIL Open Font License 1.1) and DejaVu Sans Mono (Bitstream Vera
   Fonts license).
 
@@ -72,7 +72,7 @@ MiTeX (https://github.com/mitex-rs/mitex)
   Copyright the MiTeX contributors. Apache License 2.0.
   Converts the LaTeX maths in a reading to Typst (the `mitex` crate); the Typst
   side of the package (`specs/`, the scope the converted commands resolve in) is
-  vendored in crates/pc4l-gui/assets/mitex/ with its LICENSE.
+  vendored in crates/squigl/assets/mitex/ with its LICENSE.
 
 egui / eframe (https://github.com/emilk/egui)
   Copyright Emil Ernerfeldt. MIT License or Apache License 2.0.

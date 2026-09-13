@@ -144,7 +144,7 @@ impl LocalBackend {
         let worker_state = Arc::clone(&self.state);
         let (device, max_image_tokens) = (self.device, self.max_image_tokens);
         std::thread::Builder::new()
-            .name("pc4l-model".into())
+            .name("squigl-model".into())
             .spawn(move || {
                 let set = |s: String| {
                     *worker_state.lock().unwrap() = State::Preparing(s);

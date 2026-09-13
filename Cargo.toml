@@ -1,12 +1,12 @@
 [workspace]
 resolver = "2"
-members = ["phone-cam4linux", "crates/pc4l", "crates/pc4l-gui"]
+members = ["phone-cam4linux", "crates/squigl-cli", "crates/squigl"]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 license = "Apache-2.0"
-repository = "https://github.com/stefan/phone-cam4linux"
+repository = "https://github.com/sjvrensburg/squigl"
 
 [workspace.dependencies]
 anyhow = "1"

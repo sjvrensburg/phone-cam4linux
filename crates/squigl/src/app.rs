@@ -1001,7 +1001,7 @@ impl App {
             return;
         }
         let Some(backend) = self.backends.get(backend_index).cloned() else {
-            self.say("no transcription backends configured (see ~/.config/pc4l/gui.toml)");
+            self.say("no transcription backends configured (see ~/.config/squigl/gui.toml)");
             return;
         };
         if self.captured.is_none() {
@@ -1035,7 +1035,7 @@ impl App {
         let name = backend.name().to_string();
         let prompt = self.config.prompts.for_mode(mode).to_string();
         std::thread::Builder::new()
-            .name("pc4l-read".into())
+            .name("squigl-read".into())
             .spawn(move || {
                 let result = backend.read(&png, mode, &prompt, (vw as u32, vh as u32));
                 let _ = tx.send(result);
@@ -1206,7 +1206,7 @@ impl App {
         let (tx, rx) = mpsc::sync_channel(1);
         let ctx = self.ctx.clone();
         std::thread::Builder::new()
-            .name("pc4l-detect".into())
+            .name("squigl-detect".into())
             .spawn(move || {
                 // Back from the decimated image to view pixels.
                 let min_side = (vw.min(vh) as f32 * MIN_BLOCK_FRACTION) as usize;
@@ -1322,7 +1322,7 @@ impl App {
         };
         let (rgba, w, h) = render_selection(&frame, self.rotation, self.selection(), 1, None);
         let path = self.save_dir.join(format!(
-            "pc4l-{}.png",
+            "squigl-{}.png",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
         ));
         let result = std::fs::create_dir_all(&self.save_dir).and_then(|()| {

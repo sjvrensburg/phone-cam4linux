@@ -1,4 +1,4 @@
-//! pc4l-gui: use an Android phone as a document camera on the desktop -- live view,
+//! squigl: use an Android phone as a document camera on the desktop -- live view,
 //! drag a region to zoom, capture, save. The phone side and the decode pipeline are
 //! the `phone-cam4linux` library; this crate is the window and the reconnect policy.
 
@@ -25,14 +25,14 @@ use stream::{Resolution, StreamConfig, Worker};
 
 /// Live view, crop and capture an Android phone's camera.
 #[derive(Parser, Debug)]
-#[command(name = "pc4l-gui", version)]
+#[command(name = "squigl", version)]
 struct Args {
     /// ADB serial of the device to use (autodetected if omitted and only one is attached).
     #[arg(long)]
     serial: Option<String>,
 
     /// Use the phone over Wi-Fi: `adb connect` to HOST[:PORT] instead of USB. See
-    /// `pc4l --tcpip` for the one-time switch.
+    /// `squigl-cli --tcpip` for the one-time switch.
     #[arg(long, value_name = "HOST[:PORT]", conflicts_with = "serial")]
     connect: Option<String>,
 
@@ -84,7 +84,7 @@ struct Args {
     #[arg(long, value_name = "DIR")]
     fetch_model: Option<PathBuf>,
 
-    /// Where captures are saved. Defaults to ~/Pictures/pc4l.
+    /// Where captures are saved. Defaults to ~/Pictures/squigl.
     #[arg(long)]
     save_dir: Option<PathBuf>,
 
@@ -186,7 +186,7 @@ fn main() -> Result<()> {
                 })?;
             anyhow::ensure!(
                 is_usable_size(w, h, decoder),
-                "{w}x{h} is not usable with the {} decoder (see `pc4l --list-sizes`)",
+                "{w}x{h} is not usable with the {} decoder (see `squigl-cli --list-sizes`)",
                 decoder.name()
             );
             Resolution::Fixed(w, h)
@@ -215,7 +215,7 @@ fn main() -> Result<()> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .unwrap_or_default();
-        home.join("Pictures").join("pc4l")
+        home.join("Pictures").join("squigl")
     });
 
     let rotation = match args.rotate.as_str() {
@@ -278,12 +278,12 @@ fn main() -> Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Phone camera")
+            .with_title("Squigl")
             .with_inner_size([1400.0, 800.0]),
         ..Default::default()
     };
     eframe::run_native(
-        "pc4l-gui",
+        "squigl",
         options,
         Box::new(move |cc| {
             let ctx = cc.egui_ctx.clone();

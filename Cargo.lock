@@ -4022,49 +4022,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2ee67f1008b1ba2321834326597b8e186293b049a023cdef258527550b9935b4"
 
 [[package]]
-name = "pc4l"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "clap",
- "ctrlc",
- "env_logger",
- "log",
- "phone-cam4linux",
-]
-
-[[package]]
-name = "pc4l-gui"
-version = "0.5.0"
-dependencies = [
- "anyhow",
- "base64 0.22.1",
- "chrono",
- "clap",
- "eframe",
- "egui",
- "env_logger",
- "half",
- "image",
- "imageproc",
- "log",
- "mitex",
- "ndarray",
- "ort",
- "phone-cam4linux",
- "serde",
- "serde_json",
- "sha2",
- "tokenizers",
- "toml 1.1.6+spec-1.1.0",
- "typst",
- "typst-as-lib",
- "typst-layout",
- "typst-render",
- "ureq 3.4.1",
-]
-
-[[package]]
 name = "peeking_take_while"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4143,7 +4100,7 @@ dependencies = [
 
 [[package]]
 name = "phone-cam4linux"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "env_logger",
@@ -5402,6 +5359,49 @@ dependencies = [
  "nom 7.1.3",
  "serde",
  "unicode-segmentation",
+]
+
+[[package]]
+name = "squigl"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "chrono",
+ "clap",
+ "eframe",
+ "egui",
+ "env_logger",
+ "half",
+ "image",
+ "imageproc",
+ "log",
+ "mitex",
+ "ndarray",
+ "ort",
+ "phone-cam4linux",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokenizers",
+ "toml 1.1.6+spec-1.1.0",
+ "typst",
+ "typst-as-lib",
+ "typst-layout",
+ "typst-render",
+ "ureq 3.4.1",
+]
+
+[[package]]
+name = "squigl-cli"
+version = "0.6.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ctrlc",
+ "env_logger",
+ "log",
+ "phone-cam4linux",
 ]
 
 [[package]]

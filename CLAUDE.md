@@ -15,21 +15,21 @@ conversion, V4L2 sink) is implemented here.
 ```
 cargo build --release                 # fetches scrcpy-server.jar on first build (needs network)
 cargo build --release --features ffmpeg   # + system libavcodec decoder (needs full FFmpeg headers)
-cargo build --release -p pc4l-gui --no-default-features   # GUI without the built-in ONNX models (no ort download) or Typst
+cargo build --release -p squigl --no-default-features   # GUI without the built-in ONNX models (no ort download) or Typst
 cargo test --workspace                 # unit tests (protocol parser, camera listing, pixel conversion, GUI crop geometry, quad rectification)
 cargo test -p phone-cam4linux protocol::tests::parses_codec_meta   # single test
 cargo clippy --workspace --all-targets [--features ffmpeg]
 cargo fmt --all -- --check             # CI enforces this and clippy -D warnings, both feature sets
 ```
 
-`pc4l-gui --rotate 270 --screenshot-after 8 --screenshot-path /tmp/gui.png` renders the
+`squigl --rotate 270 --screenshot-after 8 --screenshot-path /tmp/gui.png` renders the
 window against the phone and writes a PNG of it; add `--dev-detect [--dev-read-all]`
 to start in block mode (and read every block) unattended.
 
 Run against a phone (USB debugging authorized, Android 12+):
 ```
-./target/release/pc4l --list-sizes
-./target/release/pc4l --facing back --resolution max --bitrate 30 --device /dev/video10
+./target/release/squigl-cli --list-sizes
+./target/release/squigl-cli --facing back --resolution max --bitrate 30 --device /dev/video10
 ```
 
 Testing tips (no `ffmpeg` CLI needed): grab a frame from the loopback with
@@ -40,7 +40,7 @@ server fails with `CAMERA_IN_USE`.
 
 Exercise the whole V4L2 sink path with **no phone attached**:
 ```
-./target/release/pc4l --test-pattern --device /dev/video10
+./target/release/squigl-cli --test-pattern --device /dev/video10
 ```
 
 ## Releases
@@ -48,7 +48,7 @@ Exercise the whole V4L2 sink path with **no phone attached**:
 `.github/workflows/release.yml` runs on a `v*` tag: builds both binaries on
 ubuntu-24.04 (the prebuilt ONNX Runtime needs glibc 2.38), packages them with the
 dereferenced `libwebgpu_dawn.so`, docs and `contrib/`, builds the models archive with
-`pc4l-gui --fetch-model` (so it carries the in-binary checksums), and publishes a
+`squigl --fetch-model` (so it carries the in-binary checksums), and publishes a
 GitHub release with `SHA256SUMS.txt`, plus the AppImage from
 `contrib/appimage/build.sh` (appimagetool 1.9.1, sha256-pinned; AppDir = the two
 binaries + `libwebgpu_dawn.so` in `usr/bin`, the `.desktop` and SVG icon from
@@ -100,16 +100,16 @@ The pipeline, in data-flow order (all in `phone-cam4linux/src/`):
 7. **`loopback.rs`** — auto-loads `v4l2loopback` via `pkexec modprobe` if the device
    node is missing.
 
-`crates/pc4l` is a clap CLI over this library; it owns the policy bits: Ctrl-C/SIGTERM
+`crates/squigl-cli` is a clap CLI over this library; it owns the policy bits: Ctrl-C/SIGTERM
 handling, the reconnect-with-backoff loop (keeping the V4L2 sink open across sessions),
 `--list-sizes` and `--resolution max`. `contrib/` has boot-time loopback config and a
 systemd user unit.
 
-`crates/pc4l-gui` is the egui document-camera window (`stream.rs`: worker thread with
+`crates/squigl` is the egui document-camera window (`stream.rs`: worker thread with
 the reconnect loop, publishing the latest `YuvFrame`; `app.rs`: preview, crop in
 *view* (rotated) coordinates mapped back to the source frame, capture, save;
 `transcribe.rs`: the `Transcriber` trait, the OpenAI-compatible and halo-workbench
-`/hint/read` backends, and the `~/.config/pc4l/gui.toml` `Config` (backend list,
+`/hint/read` backends, and the `~/.config/squigl/gui.toml` `Config` (backend list,
 `[layout]`, `[prompts]`, `[ui] scale`) -- the default prompts are verbatim from
 halo-workbench's `handwriting.py` and travel with each read (`Transcriber::read`
 takes the prompt; the hint API ignores it),
@@ -145,9 +145,9 @@ column plus `[N,200,200]` instance masks; mask → largest contour → approxPol
 min-area rect gives the quad, as PaddleX does; `suppress_overlaps` is the
 cross-class NMS PaddleX also runs, since the model reports the same lines twice at
 times), `local/models.rs` finds or downloads
-each model's files (pinned HF revision + sha256 manifest; `$PC4L_MODEL_DIR/<name>/`,
+each model's files (pinned HF revision + sha256 manifest; `$SQUIGL_MODEL_DIR/<name>/`,
 `models/<name>/` beside `$APPIMAGE`, exe-adjacent `models/<name>/`, then
-`~/.cache/pc4l/models/<name>/`), and
+`~/.cache/squigl/models/<name>/`), and
 `local/mod.rs` holds the one process-wide `ort` environment (`ort` refuses a second)
 and wraps GLM-OCR as a `Transcriber` that prepares on a thread, plus `RUNTIME`, the
 one lock every session load and run takes: the WebGPU EP segfaults on concurrent

@@ -1,5 +1,5 @@
 //! Reading a crop: the [`Transcriber`] trait and the remote backends, plus the on-disk
-//! backend list (`~/.config/pc4l/gui.toml`).
+//! backend list (`~/.config/squigl/gui.toml`).
 //!
 //! The rules come from halo-workbench's hint tool, which this replaces: several
 //! readings are shown as several readings (grouped by identical text, counted, never
@@ -397,7 +397,7 @@ impl Config {
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
             .unwrap_or_default();
-        base.join("pc4l").join("gui.toml")
+        base.join("squigl").join("gui.toml")
     }
 
     /// The file's contents, or -- if there is no file -- the defaults, written out so
@@ -437,7 +437,7 @@ impl Config {
 
     fn text(&self) -> String {
         format!(
-            "# pc4l-gui settings: edit here or in the window's Settings. Each [[backends]]\n\
+            "# squigl settings: edit here or in the window's Settings. Each [[backends]]\n\
              # entry is one choice in the window; the first is selected at startup.\n\
              # [layout] is the block detector, [prompts] what the models are asked,\n\
              # [ui] the window.\n\n{}",

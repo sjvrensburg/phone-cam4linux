@@ -32,7 +32,7 @@ jobs:
         run: |
           sudo apt-get update
           # nasm: openh264 assembly; libclang: bindgen for the v4l/ffmpeg -sys crates;
-          # xkbcommon/wayland: eframe (pc4l-gui) links these on Linux.
+          # xkbcommon/wayland: eframe (squigl) links these on Linux.
           sudo apt-get install -y --no-install-recommends nasm libclang-dev pkg-config libxkbcommon-dev libwayland-dev ${{ matrix.apt }}
 
       - uses: dtolnay/rust-toolchain@stable
@@ -68,4 +68,4 @@ jobs:
         run: cargo test --workspace ${{ matrix.args }}
 
       - name: Build release binaries
-        run: cargo build --release -p pc4l -p pc4l-gui ${{ matrix.args }}
+        run: cargo build --release -p squigl-cli -p squigl ${{ matrix.args }}

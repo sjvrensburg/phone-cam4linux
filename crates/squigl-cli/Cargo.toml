@@ -1,5 +1,5 @@
 [package]
-name = "pc4l"
+name = "squigl-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,7 @@ repository.workspace = true
 description = "CLI: stream an Android phone's camera to a Linux V4L2 device"
 
 [[bin]]
-name = "pc4l"
+name = "squigl-cli"
 path = "src/main.rs"
 
 [dependencies]

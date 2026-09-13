@@ -77,7 +77,7 @@ impl History {
     /// they were read (page order for a "read all").
     pub fn markdown(&self, ui_cfg: &UiConfig) -> String {
         let mut out = format!(
-            "# pc4l readings — {}\n\n",
+            "# squigl readings — {}\n\n",
             Local::now().format("%Y-%m-%d %H:%M")
         );
         let mut capture = None;
@@ -108,7 +108,7 @@ impl History {
     pub fn save(&self, dir: &Path, ui_cfg: &UiConfig) -> std::io::Result<PathBuf> {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!(
-            "pc4l-readings-{}.md",
+            "squigl-readings-{}.md",
             Local::now().format("%Y%m%d-%H%M%S")
         ));
         std::fs::write(&path, self.markdown(ui_cfg))?;

@@ -1,6 +1,6 @@
 //! The camera worker thread: connects to the phone, decodes, and publishes the latest
 //! frame for the UI, reconnecting with backoff when the stream drops (the same
-//! policy as the `pc4l` CLI). Optionally tees every frame to a V4L2 device too.
+//! policy as the `squigl-cli` CLI). Optionally tees every frame to a V4L2 device too.
 
 use anyhow::{Context, Result};
 use phone_cam4linux::cameras::is_usable_size;
@@ -243,12 +243,12 @@ impl Worker {
         };
         let zoom_shared = Arc::clone(&shared);
         std::thread::Builder::new()
-            .name("pc4l-zoom".into())
+            .name("squigl-zoom".into())
             .spawn(move || zoom_shared.run_zoom())
             .expect("spawning zoom thread");
         let thread_shared = Arc::clone(&shared);
         let handle = std::thread::Builder::new()
-            .name("pc4l-stream".into())
+            .name("squigl-stream".into())
             .spawn(move || run_loop(&thread_shared, &wake))
             .expect("spawning stream thread");
         Self {
