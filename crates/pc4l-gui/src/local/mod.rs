@@ -252,6 +252,7 @@ impl Transcriber for LocalBackend {
                     text: out.text,
                     count: 1,
                     truncated: out.truncated,
+                    tokens: (!out.tokens.is_empty()).then_some(out.tokens),
                 }],
                 0,
             )
