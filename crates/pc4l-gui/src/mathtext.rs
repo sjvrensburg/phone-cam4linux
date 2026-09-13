@@ -4,6 +4,7 @@
 //! compiled by Typst and rasterised. Anything that does not convert or compile is
 //! left as the text it was: a rendering is a convenience, the reading is the text.
 
+use crate::app::TintSpan;
 use anyhow::{anyhow, Result};
 use image::RgbaImage;
 use std::time::Instant;
@@ -131,17 +132,19 @@ impl Renderer {
     }
 
     /// Typesets `text` `width_pt` points wide at `size_pt`, `scale` pixels per
-    /// point, in colour `rgb`. Errors when the text does not compile.
+    /// point, in colour `rgb`, tinting `spans` by hesitation. Errors when the text
+    /// does not compile.
     pub fn render(
         &self,
         text: &str,
+        spans: &[TintSpan],
         width_pt: f32,
         size_pt: f32,
         scale: f32,
         rgb: [u8; 3],
     ) -> Result<Rendered> {
         let started = Instant::now();
-        let src = to_typst(text);
+        let src = to_typst(text, spans);
         let mut inputs = Dict::new();
         inputs.insert("src".into(), src.into_value());
         inputs.insert("width".into(), f64::from(width_pt).into_value());
@@ -185,21 +188,28 @@ impl Renderer {
 }
 
 /// The reading as Typst markup: maths converted (a `$$` block may span lines), the
-/// rest escaped with its line breaks kept.
-fn to_typst(text: &str) -> String {
+/// rest escaped with its line breaks kept. `spans` tints hesitant/wavering tokens:
+/// plain text with `#highlight`, a maths segment as a whole by its worst
+/// overlapping span (a token is a BPE piece of the LaTeX source, not of a
+/// rendered symbol, so shading part of a converted formula is not attempted).
+fn to_typst(text: &str, spans: &[TintSpan]) -> String {
+    // `rest` is always a suffix of `text`, so its absolute offset needs no
+    // separate bookkeeping.
+    let abs = |rest: &str| text.len() - rest.len();
     let mut out = String::new();
     let mut rest = text;
     let mut at_line_start = true;
     while !rest.is_empty() {
         let Some((start, open, close, display)) = next_math(rest) else {
-            escape(rest, at_line_start, &mut out);
+            escape_tinted(rest, abs(rest), at_line_start, spans, &mut out);
             break;
         };
-        escape(&rest[..start], at_line_start, &mut out);
+        escape_tinted(&rest[..start], abs(rest), at_line_start, spans, &mut out);
         at_line_start = false;
         let after = &rest[start + open.len()..];
         match after.find(close) {
             Some(end) => {
+                let seg = &rest[start..start + open.len() + end + close.len()];
                 let tex = &after[..end];
                 // Newlines inside the converted maths are only layout.
                 let converted = mitex::convert_math(tex, None).map(|m| {
@@ -210,19 +220,33 @@ fn to_typst(text: &str) -> String {
                 });
                 match converted {
                     Ok(math) if !tex.trim().is_empty() => {
+                        let seg_start = abs(rest) + start;
+                        let seg_end = seg_start + seg.len();
+                        let tint = worst_tint(spans, seg_start, seg_end);
+                        if let Some(color) = tint {
+                            out.push_str(&format!(
+                                "#box(fill: {}, inset: 2pt)[",
+                                typst_color(color)
+                            ));
+                        }
                         if display {
                             out.push_str(&format!("$ {math} $"));
                         } else {
                             out.push_str(&format!("${math}$"));
                         }
+                        if tint.is_some() {
+                            out.push(']');
+                        }
+                        rest = &after[end + close.len()..];
+                        if tint.is_some() {
+                            rest = &rest[guard_call_adjacency(rest, &mut out)..];
+                        }
                     }
-                    _ => escape(
-                        &rest[start..start + open.len() + end + close.len()],
-                        false,
-                        &mut out,
-                    ),
+                    _ => {
+                        escape_tinted(seg, abs(rest) + start, false, spans, &mut out);
+                        rest = &after[end + close.len()..];
+                    }
                 }
-                rest = &after[end + close.len()..];
                 // A display block on its own line: the newline after it is its own.
                 if display {
                     if let Some(r) = rest.strip_prefix('\n') {
@@ -232,7 +256,7 @@ fn to_typst(text: &str) -> String {
                 }
             }
             None => {
-                escape(&rest[start..], false, &mut out);
+                escape_tinted(&rest[start..], abs(rest) + start, false, spans, &mut out);
                 break;
             }
         }
@@ -261,8 +285,12 @@ fn next_math(s: &str) -> Option<(usize, &'static str, &'static str, bool)> {
 }
 
 /// Plain text as Typst markup: everything that would be syntax is backslashed,
-/// and the list/heading markers only matter at the start of a line.
-fn escape(s: &str, at_line_start: bool, out: &mut String) {
+/// and the list/heading markers only matter at the start of a line. Returns
+/// whether the position right after `s` is still at a line start (no non-
+/// whitespace seen since the last line break) -- callers that split `s` at tint
+/// span boundaries thread this back in as the next call's `at_line_start` so a
+/// split does not change how leading list markers are escaped.
+fn escape(s: &str, at_line_start: bool, out: &mut String) -> bool {
     let mut first = at_line_start;
     for (i, line) in s.split('\n').enumerate() {
         if i > 0 {
@@ -286,18 +314,105 @@ fn escape(s: &str, at_line_start: bool, out: &mut String) {
             }
         }
     }
+    first
+}
+
+/// `escape`, but wrapping any part of `s` a tint span covers in
+/// `#highlight(fill: ..)[...]`. `abs_start` is `s`'s byte offset in the full text
+/// `spans` is given in.
+fn escape_tinted(
+    s: &str,
+    abs_start: usize,
+    at_line_start: bool,
+    spans: &[TintSpan],
+    out: &mut String,
+) -> bool {
+    let abs_end = abs_start + s.len();
+    let mut clipped: Vec<(usize, usize, [u8; 4])> = spans
+        .iter()
+        .filter_map(|sp| {
+            let start = sp.start.max(abs_start);
+            let end = sp.end.min(abs_end);
+            // `then_some` evaluates its argument eagerly, so `end - abs_start`
+            // would underflow here for a span entirely before this chunk (end <
+            // abs_start) before the `start < end` guard ever gets to discard it.
+            if start < end {
+                Some((start - abs_start, end - abs_start, sp.color))
+            } else {
+                None
+            }
+        })
+        .collect();
+    clipped.sort_by_key(|&(start, _, _)| start);
+    let mut at_line_start = at_line_start;
+    let mut pos = 0usize;
+    for (start, end, color) in clipped {
+        if start > pos {
+            at_line_start = escape(&s[pos..start], at_line_start, out);
+        }
+        out.push_str(&format!("#highlight(fill: {})[", typst_color(color)));
+        at_line_start = escape(&s[start..end], at_line_start, out);
+        out.push(']');
+        pos = end + guard_call_adjacency(&s[end..], out);
+    }
+    if pos < s.len() {
+        at_line_start = escape(&s[pos..], at_line_start, out);
+    }
+    at_line_start
+}
+
+/// After one of our own `#highlight(..)[..]` or `#box(..)[..]` calls, Typst
+/// treats certain characters immediately following it (no separating character)
+/// as continuing that code expression rather than starting fresh markup: `(`
+/// as calling the call's content result like a function ("expected function,
+/// found content"; hit live against GPT-5's un-delimited "η sign(wx+b)", which
+/// tinted "sign" right up against its own "(") and `.` as field access on it
+/// ("content does not have field ..."; hit live too, from a tinted word
+/// directly followed by a sentence-ending "."). `[` needs no separate handling
+/// here -- `escape`'s own special-char list already backslashes it always, not
+/// only in this position. Escaping the triggering character breaks the
+/// adjacency without changing what is shown. Returns the number of bytes of
+/// `next` consumed (0 or 1), for the caller to skip so it is not processed
+/// twice.
+fn guard_call_adjacency(next: &str, out: &mut String) -> usize {
+    match next.chars().next() {
+        Some(c @ ('(' | '.')) => {
+            out.push('\\');
+            out.push(c);
+            c.len_utf8()
+        }
+        _ => 0,
+    }
+}
+
+/// The colour of the highest-`severity` span overlapping `[start, end)`, if any.
+fn worst_tint(spans: &[TintSpan], start: usize, end: usize) -> Option<[u8; 4]> {
+    spans
+        .iter()
+        .filter(|sp| sp.start < end && sp.end > start)
+        .max_by_key(|sp| sp.severity)
+        .map(|sp| sp.color)
+}
+
+/// An RGBA colour as a Typst `rgb(..)` call.
+fn typst_color(rgba: [u8; 4]) -> String {
+    format!(
+        "rgb(\"#{:02x}{:02x}{:02x}{:02x}\")",
+        rgba[0], rgba[1], rgba[2], rgba[3]
+    )
 }
 
 impl crate::app::Typesetter for Renderer {
     fn render(
         &self,
         text: &str,
+        spans: &[TintSpan],
         width_pt: f32,
         size_pt: f32,
         scale: f32,
         rgb: [u8; 3],
     ) -> Result<(RgbaImage, f32)> {
-        let r = Renderer::render(self, text, width_pt, size_pt, scale, rgb)?;
+        let r = Renderer::render(self, text, spans, width_pt, size_pt, scale, rgb)?;
         Ok((r.image, r.scale))
     }
 }
@@ -308,7 +423,7 @@ mod tests {
 
     #[test]
     fn converts_maths_and_escapes_the_rest() {
-        let t = to_typst("where $\\hat{y}_i \\neq y_i$ (see #3)\nnext line");
+        let t = to_typst("where $\\hat{y}_i \\neq y_i$ (see #3)\nnext line", &[]);
         assert!(t.starts_with("where $hat("), "{t}");
         assert!(t.contains("!="), "{t}");
         assert!(t.contains("\\#3"), "{t}");
@@ -317,7 +432,7 @@ mod tests {
 
     #[test]
     fn display_maths_spans_lines() {
-        let t = to_typst("func\n$$\n\\ln x+b 1\n$$\nnext");
+        let t = to_typst("func\n$$\n\\ln x+b 1\n$$\nnext", &[]);
         assert!(t.contains("$ ln"), "{t}");
         assert!(!t.contains("\\$"), "{t}");
         assert!(t.ends_with("next"), "{t}");
@@ -325,13 +440,13 @@ mod tests {
 
     #[test]
     fn unclosed_maths_stays_text() {
-        let t = to_typst("cost $5 and more");
+        let t = to_typst("cost $5 and more", &[]);
         assert_eq!(t, "cost \\$5 and more");
     }
 
     #[test]
     fn list_markers_are_escaped_only_at_line_start() {
-        let t = to_typst("- a - b\n= c");
+        let t = to_typst("- a - b\n= c", &[]);
         assert_eq!(t, "\\- a - b \\\n\\= c");
     }
 
@@ -350,7 +465,7 @@ mod tests {
     fn a_page_with_partials_cases_and_operators_renders() {
         let text = "1) cases when $y_i \\neq y_j$\n$$\\frac{\\partial l}{\\partial w} = \\begin{cases} -x & \\text{if } wx+b < 0 \\\\ x & \\text{if } wx+b > 0 \\end{cases}$$\n$$w_{i.e.} = \\pi \\operatorname{sign}(wx+b)x; \\hbar \\oplus \\langle x \\rangle$$";
         let r = Renderer::new();
-        let out = r.render(text, 300.0, 12.0, 1.0, [0, 0, 0]).unwrap();
+        let out = r.render(text, &[], 300.0, 12.0, 1.0, [0, 0, 0]).unwrap();
         assert!(out.image.height() > 40);
     }
 
@@ -360,6 +475,7 @@ mod tests {
         let out = r
             .render(
                 "The entropy is $E = -\\sum_i p_i \\log_2 p_i$",
+                &[],
                 300.0,
                 12.0,
                 1.0,
@@ -368,5 +484,195 @@ mod tests {
             .unwrap();
         assert!(out.image.width() > 250 && out.image.height() > 10);
         assert!(out.image.pixels().any(|p| p[3] > 0));
+    }
+
+    #[test]
+    fn tinted_maths_segment_is_boxed() {
+        let spans = [TintSpan {
+            start: "before ".len(),
+            end: "before $x$".len(),
+            color: [255, 0, 0, 80],
+            severity: 2,
+        }];
+        let t = to_typst("before $x$ after", &spans);
+        assert!(t.contains(&format!(
+            "#box(fill: {}, inset: 2pt)[$x$]",
+            typst_color([255, 0, 0, 80])
+        )));
+    }
+
+    #[test]
+    fn tinted_display_maths_actually_compiles() {
+        let r = Renderer::new();
+        let text = "before\n$$\\frac{\\partial L}{\\partial w} = x$$\nafter";
+        let spans = [TintSpan {
+            start: text.find("\\frac").unwrap(),
+            end: text.find("= x").unwrap(),
+            color: [229, 57, 53, 80],
+            severity: 2,
+        }];
+        let src = to_typst(text, &spans);
+        eprintln!("generated markup: {src}");
+        let out = r.render(text, &spans, 300.0, 12.0, 1.0, [0, 0, 0]);
+        if let Err(e) = &out {
+            eprintln!("compile error: {e}");
+        }
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn tinted_word_immediately_followed_by_a_literal_paren_compiles() {
+        // Hit live against GPT-5: the model wrote maths with Unicode symbols and
+        // no `$..$` delimiters ("η sign(wx+b)"), so "sign" ended up a plain
+        // highlighted word with no gap before the "(" that followed it in the
+        // source text. Typst reads "#highlight(..)[sign](" as calling the
+        // highlight's content result like a function ("expected function, found
+        // content") unless the paren is escaped.
+        let r = Renderer::new();
+        let text = "η sign(wx+b) xi";
+        let spans = [TintSpan {
+            start: text.find("sign").unwrap(),
+            end: text.find("sign").unwrap() + "sign".len(),
+            color: [230, 57, 54, 80],
+            severity: 2,
+        }];
+        let src = to_typst(text, &spans);
+        assert!(src.contains("[sign]\\("), "{src}");
+        let out = r.render(text, &spans, 300.0, 12.0, 1.0, [0, 0, 0]);
+        if let Err(e) = &out {
+            eprintln!("compile error: {e}");
+        }
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn tinted_word_immediately_followed_by_a_period_compiles() {
+        // Same adjacency problem, "." instead of "(": Typst reads
+        // "#highlight(..)[word]." as field access on the content result
+        // ("content does not have field ..") unless the period is escaped.
+        // Hit live against GPT-5 too, from a tinted word ending a sentence.
+        let r = Renderer::new();
+        let text = "cases where word. Next sentence";
+        let spans = [TintSpan {
+            start: text.find("word").unwrap(),
+            end: text.find("word").unwrap() + "word".len(),
+            color: [255, 179, 0, 70],
+            severity: 1,
+        }];
+        let src = to_typst(text, &spans);
+        assert!(src.contains("[word]\\."), "{src}");
+        let out = r.render(text, &spans, 300.0, 12.0, 1.0, [0, 0, 0]);
+        if let Err(e) = &out {
+            eprintln!("compile error: {e}");
+        }
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn tinted_maths_segment_immediately_followed_by_a_literal_paren_compiles() {
+        // Same adjacency problem, for a boxed (whole-segment-tinted) maths
+        // segment immediately followed by "(" in the surrounding prose.
+        let r = Renderer::new();
+        let text = "before $x$(after)";
+        let math_start = text.find("$x$").unwrap();
+        let spans = [TintSpan {
+            start: math_start,
+            end: math_start + "$x$".len(),
+            color: [255, 179, 0, 70],
+            severity: 1,
+        }];
+        let src = to_typst(text, &spans);
+        assert!(src.contains("]\\("), "{src}");
+        let out = r.render(text, &spans, 300.0, 12.0, 1.0, [0, 0, 0]);
+        if let Err(e) = &out {
+            eprintln!("compile error: {e}");
+        }
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn tinted_full_page_like_the_screenshot_compiles() {
+        let r = Renderer::new();
+        let text = "The perception algorithm is based on:\n\
+             1) Only updating for cases when $g_i \\neq y_i$\n\
+             2) An absolute value loss function\n\n\
+             $$\\frac{\\partial L}{\\partial w} = \\begin{cases} -x & \\text{if } wx+b < 0 \\\\ x & \\text{if } wx+b > 0 \\end{cases}$$\n\n\
+             3) I.e., the get step is:\n\
+             $$w_i = w_i + \\text{sign}(wx+b)x$$\n\n\
+             Decision Tree:\n\
+             - Recursively splits data in order to clarify points\n\
+             - Spits in feature space\n\
+             - Determines splits that maximize the information gain.";
+        // Tint roughly every third byte-run to a few characters, alternating
+        // severities, without regard for word or token boundaries -- mimics a
+        // BPE tokenizer's arbitrary sub-word splits, including splits that land
+        // inside the LaTeX source and across the `$`/`$$` delimiters themselves.
+        let mut spans = Vec::new();
+        let mut i = 0;
+        let mut severity = 1u8;
+        while i + 3 <= text.len() {
+            if text.is_char_boundary(i) && text.is_char_boundary(i + 3) {
+                spans.push(TintSpan {
+                    start: i,
+                    end: i + 3,
+                    color: if severity == 2 {
+                        [229, 57, 53, 80]
+                    } else {
+                        [255, 179, 0, 70]
+                    },
+                    severity,
+                });
+                severity = 3 - severity;
+            }
+            i += 5;
+        }
+        let src = to_typst(text, &spans);
+        eprintln!("generated markup:\n{src}");
+        let out = r.render(text, &spans, 300.0, 12.0, 1.0, [0, 0, 0]);
+        if let Err(e) = &out {
+            eprintln!("compile error: {e}");
+        }
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn tinted_reading_actually_compiles() {
+        let r = Renderer::new();
+        let spans = [
+            TintSpan {
+                start: "before ".len(),
+                end: "before word".len(),
+                color: [255, 179, 0, 70],
+                severity: 1,
+            },
+            TintSpan {
+                start: "before word $".len(),
+                end: "before word $x$".len(),
+                color: [229, 57, 53, 80],
+                severity: 2,
+            },
+        ];
+        let src = to_typst("before word $x$ after", &spans);
+        eprintln!("generated markup: {src}");
+        let out = r.render("before word $x$ after", &spans, 300.0, 12.0, 1.0, [0, 0, 0]);
+        if let Err(e) = &out {
+            eprintln!("compile error: {e}");
+        }
+        assert!(out.is_ok());
+    }
+
+    #[test]
+    fn tinted_text_is_highlighted() {
+        let spans = [TintSpan {
+            start: "before ".len(),
+            end: "before word".len(),
+            color: [255, 179, 0, 70],
+            severity: 1,
+        }];
+        let t = to_typst("before word after", &spans);
+        assert!(t.contains(&format!(
+            "before #highlight(fill: {})[word] after",
+            typst_color([255, 179, 0, 70])
+        )));
     }
 }

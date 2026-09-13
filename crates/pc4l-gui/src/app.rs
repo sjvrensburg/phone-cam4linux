@@ -13,14 +13,18 @@
 //! rectangle (a curved or tilted page) is rectified before it is shown or read. The
 //! crop's corners can be dragged, so a block is a starting point, not a verdict.
 
+use crate::enhance::{self, EnhanceConfig, EnhanceMode};
 use crate::history::{self, History};
 use crate::layout::{self, Block, BlockDetector, Quad, Role};
 use crate::settings;
 use crate::stream::{Shared, Status, Worker};
-use crate::transcribe::{BackendConfig, Config, LayoutConfig, Mode, Transcriber, Transcription};
+use crate::transcribe::{
+    BackendConfig, Confidence, Config, LayoutConfig, Mode, Reading, Transcriber, Transcription,
+    UiConfig,
+};
 use egui::{
-    Color32, ColorImage, FontId, Key, Pos2, Rect, Sense, Shape, Stroke, StrokeKind, TextureHandle,
-    TextureOptions, Vec2,
+    Color32, ColorImage, ComboBox, FontId, Key, Pos2, Rect, Sense, Shape, Slider, Stroke,
+    StrokeKind, TextureHandle, TextureOptions, Vec2,
 };
 use phone_cam4linux::convert::{i420_region_to_rgba, region_size, rotate_rgba, Rotation};
 use phone_cam4linux::decode::YuvFrame;
@@ -169,18 +173,69 @@ fn wheel_notches(accum: &mut f32, delta: f32) -> i32 {
     notches as i32
 }
 
+/// A byte range of the text handed to [`Typesetter::render`], to be tinted by
+/// hesitation. Disjoint and given in byte order; `severity` breaks a tie when a
+/// LaTeX maths segment is shaded as a whole and more than one span falls inside
+/// it (higher wins).
+///
+/// Only `mathtext::Renderer` (the `math`-feature `Typesetter`) reads the fields;
+/// without that feature there is no implementor, so a build without it is warned
+/// they go unread.
+#[derive(Debug)]
+#[cfg_attr(not(feature = "math"), allow(dead_code))]
+pub struct TintSpan {
+    pub start: usize,
+    pub end: usize,
+    pub color: [u8; 4],
+    pub severity: u8,
+}
+
 /// Typesets a reading (LaTeX maths and all) into pixels; `None` in a build without
 /// one. Implemented by `mathtext::Renderer`.
 pub trait Typesetter: Send + Sync {
     /// `width_pt` points wide, text `size_pt`, `scale` pixels per point, in `rgb`.
+    /// `spans` tints hesitant/wavering tokens -- plain text by `#highlight`, a
+    /// LaTeX maths segment as a whole by its worst overlapping span.
     fn render(
         &self,
         text: &str,
+        spans: &[TintSpan],
         width_pt: f32,
         size_pt: f32,
         scale: f32,
         rgb: [u8; 3],
     ) -> anyhow::Result<(image::RgbaImage, f32)>;
+}
+
+/// The text to typeset for a reading, and the tint spans over it: the tokens'
+/// concatenation when they are valid (so span byte offsets line up exactly; see
+/// [`Reading::tokens_if_valid`]) and one span per non-steady token, else the
+/// reading's own text and no spans.
+fn typeset_source(r: &Reading, ui_cfg: &UiConfig) -> (String, Vec<TintSpan>) {
+    let Some(tokens) = r.tokens_if_valid() else {
+        return (r.text.clone(), Vec::new());
+    };
+    let mut text = String::new();
+    let mut spans = Vec::new();
+    for tok in tokens {
+        let start = text.len();
+        text.push_str(&tok.text);
+        let end = text.len();
+        let confidence = tok.confidence(ui_cfg);
+        if let Some(color) = confidence_tint(confidence) {
+            spans.push(TintSpan {
+                start,
+                end,
+                color: color.to_srgba_unmultiplied(),
+                severity: match confidence {
+                    Confidence::Hesitant => 2,
+                    Confidence::Wavering => 1,
+                    Confidence::Steady => 0,
+                },
+            });
+        }
+    }
+    (text, spans)
 }
 
 /// Width the readings are typeset at, in points; shown scaled down if the panel
@@ -256,39 +311,56 @@ pub struct Selection {
 }
 
 /// The pixels of a selection (or the whole view when there is none) at every
-/// `step`-th pixel, rotated as shown and, for a quad, rectified. Returns the pixels
-/// and their size.
+/// `step`-th pixel, rotated as shown and, for a quad, rectified. `enhance`, when
+/// given, is applied last -- this is the crop the model reads and/or the crop panel
+/// shows; the preview and live block detection call [`render_region`] directly and
+/// stay raw. Returns the pixels and their size.
 fn render_selection(
     frame: &YuvFrame,
     rotation: Rotation,
     selection: Option<Selection>,
     step: usize,
+    enhance: Option<&EnhanceConfig>,
 ) -> (Vec<u8>, usize, usize) {
     let (vw, vh) = rotation.rotated_size(frame.width, frame.height);
-    let Some(sel) = selection else {
-        return render_region(frame, rotation, Crop::whole(vw, vh), step);
-    };
-    let (rgba, w, h) = render_region(frame, rotation, sel.rect, step);
-    let Some(quad) = sel.quad else {
-        return (rgba, w, h);
-    };
-    // The quad in the rendered region's own pixels.
-    let local: Quad = quad.map(|[x, y]| {
-        [
-            (x - sel.rect.x as f32) / step as f32,
-            (y - sel.rect.y as f32) / step as f32,
-        ]
-    });
-    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba).expect("buffer matches size");
-    match layout::rectify(&img, &local) {
-        Some(out) => {
-            let (ow, oh) = (out.width() as usize, out.height() as usize);
-            (out.into_raw(), ow, oh)
+    let (rgba, w, h) = match selection {
+        None => render_region(frame, rotation, Crop::whole(vw, vh), step),
+        Some(sel) => {
+            let (rgba, w, h) = render_region(frame, rotation, sel.rect, step);
+            match sel.quad {
+                None => (rgba, w, h),
+                Some(quad) => {
+                    // The quad in the rendered region's own pixels.
+                    let local: Quad = quad.map(|[x, y]| {
+                        [
+                            (x - sel.rect.x as f32) / step as f32,
+                            (y - sel.rect.y as f32) / step as f32,
+                        ]
+                    });
+                    let img = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
+                        .expect("buffer matches size");
+                    match layout::rectify(&img, &local) {
+                        Some(out) => {
+                            let (ow, oh) = (out.width() as usize, out.height() as usize);
+                            (out.into_raw(), ow, oh)
+                        }
+                        None => {
+                            let (w, h) = (img.width() as usize, img.height() as usize);
+                            (img.into_raw(), w, h)
+                        }
+                    }
+                }
+            }
         }
-        None => {
-            let (w, h) = (img.width() as usize, img.height() as usize);
-            (img.into_raw(), w, h)
+    };
+    match enhance {
+        Some(cfg) if cfg.mode != EnhanceMode::Off => {
+            let img =
+                image::RgbaImage::from_raw(w as u32, h as u32, rgba).expect("buffer matches size");
+            let out = enhance::apply(&img, cfg);
+            (out.into_raw(), w, h)
         }
+        _ => (rgba, w, h),
     }
 }
 
@@ -308,6 +380,7 @@ type ViewKey = (
     Option<Selection>,
     usize,
     Rotation,
+    Option<EnhanceConfig>,
     (usize, usize),
 );
 
@@ -329,7 +402,8 @@ impl View {
         }
     }
 
-    /// `selection` is `None` for the whole view.
+    /// `selection` is `None` for the whole view. `enhance` is `None` for a view that
+    /// stays raw (the preview).
     fn update(
         &mut self,
         ctx: &egui::Context,
@@ -337,19 +411,32 @@ impl View {
         selection: Option<Selection>,
         step: usize,
         rotation: Rotation,
+        enhance: Option<EnhanceConfig>,
     ) -> (usize, usize) {
-        if let Some((f, r, s, rot, size)) = &self.key {
-            if Arc::ptr_eq(f, frame) && *r == selection && *s == step && *rot == rotation {
+        if let Some((f, r, s, rot, e, size)) = &self.key {
+            if Arc::ptr_eq(f, frame)
+                && *r == selection
+                && *s == step
+                && *rot == rotation
+                && *e == enhance
+            {
                 return *size;
             }
         }
-        let (rgba, w, h) = render_selection(frame, rotation, selection, step);
+        let (rgba, w, h) = render_selection(frame, rotation, selection, step, enhance.as_ref());
         let image = ColorImage::from_rgba_unmultiplied([w, h], &rgba);
         match &mut self.texture {
             Some(t) => t.set(image, TextureOptions::LINEAR),
             None => self.texture = Some(ctx.load_texture(self.name, image, TextureOptions::LINEAR)),
         }
-        self.key = Some((Arc::clone(frame), selection, step, rotation, (w, h)));
+        self.key = Some((
+            Arc::clone(frame),
+            selection,
+            step,
+            rotation,
+            enhance,
+            (w, h),
+        ));
         (w, h)
     }
 }
@@ -556,6 +643,7 @@ impl App {
         let mut open = true;
         let mut save = false;
         let mut copy = false;
+        let ui_cfg = self.config.ui.clone();
         egui::Window::new("Readings this session")
             .open(&mut open)
             .default_width(560.0)
@@ -591,23 +679,23 @@ impl App {
                                     ui.weak(&t.backend);
                                 }
                                 if ui.small_button("copy").clicked() {
-                                    ui.ctx().copy_text(e.text());
+                                    ui.ctx().copy_text(e.text(&ui_cfg));
                                 }
                             });
-                            let text = e.text();
+                            let text = e.text(&ui_cfg);
                             ui.add(egui::Label::new(text).wrap());
                             ui.separator();
                         }
                     });
             });
         if save {
-            match self.history.save(&self.save_dir) {
+            match self.history.save(&self.save_dir, &ui_cfg) {
                 Ok(path) => self.say(format!("readings saved to {}", path.display())),
                 Err(e) => self.say(format!("saving readings failed: {e}")),
             }
         }
         if copy {
-            ctx.copy_text(history::joined(self.history.entries.iter()));
+            ctx.copy_text(history::joined(self.history.entries.iter(), &ui_cfg));
             self.say("all readings copied");
         }
         self.history_open = open;
@@ -927,7 +1015,13 @@ impl App {
         // starts a fresh list.
         self.set_results_key(scope);
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
-        let (rgba, w, h) = render_selection(&frame, self.rotation, selection, 1);
+        let (rgba, w, h) = render_selection(
+            &frame,
+            self.rotation,
+            selection,
+            1,
+            Some(&self.config.enhance),
+        );
         let mut png = Vec::new();
         let encoded = image::RgbaImage::from_raw(w as u32, h as u32, rgba)
             .expect("buffer matches size")
@@ -1226,7 +1320,7 @@ impl App {
             self.say("nothing to save yet");
             return;
         };
-        let (rgba, w, h) = render_selection(&frame, self.rotation, self.selection(), 1);
+        let (rgba, w, h) = render_selection(&frame, self.rotation, self.selection(), 1, None);
         let path = self.save_dir.join(format!(
             "pc4l-{}.png",
             chrono::Local::now().format("%Y%m%d-%H%M%S")
@@ -1427,7 +1521,7 @@ impl App {
         let (vw, vh) = self.rotation.rotated_size(frame.width, frame.height);
         let step = vw.max(vh).div_ceil(PREVIEW_MAX_EDGE).max(1);
         self.preview
-            .update(ui.ctx(), frame, None, step, self.rotation);
+            .update(ui.ctx(), frame, None, step, self.rotation, None);
         let Some(texture) = &self.preview.texture else {
             return;
         };
@@ -1651,6 +1745,52 @@ impl App {
         egui::CentralPanel::default().show(ui, |ui| self.crop_image(ui, frame));
     }
 
+    /// Live enhancement controls: mode, and -- once it is on -- the knobs that shape
+    /// it. Deliberately not a one-time tuned setting: light, angle and distance vary
+    /// shot to shot, so the user drives these directly while looking at the result.
+    fn enhance_controls(&mut self, ui: &mut egui::Ui) {
+        let cfg = &mut self.config.enhance;
+        ui.horizontal(|ui| {
+            ui.label("Enhance [E]");
+            ComboBox::from_id_salt("enhance-mode")
+                .selected_text(cfg.mode.label())
+                .show_ui(ui, |ui| {
+                    for mode in [EnhanceMode::Off, EnhanceMode::Auto, EnhanceMode::Ink] {
+                        ui.selectable_value(&mut cfg.mode, mode, mode.label());
+                    }
+                });
+            if cfg.mode == EnhanceMode::Ink {
+                ComboBox::from_id_salt("enhance-channel")
+                    .selected_text(cfg.channel.label())
+                    .show_ui(ui, |ui| {
+                        for channel in enhance::Channel::ALL {
+                            ui.selectable_value(&mut cfg.channel, channel, channel.label());
+                        }
+                    });
+            }
+        });
+        if cfg.mode != EnhanceMode::Off {
+            ui.horizontal(|ui| {
+                ui.label("Strength");
+                ui.add(Slider::new(&mut cfg.strength, 0.0..=1.0).step_by(0.05));
+                ui.label("Black pt");
+                ui.add(
+                    Slider::new(&mut cfg.black_point, 0.0..=49.0)
+                        .step_by(1.0)
+                        .suffix("%"),
+                );
+                ui.label("White pt");
+                ui.add(
+                    Slider::new(&mut cfg.white_point, 51.0..=100.0)
+                        .step_by(1.0)
+                        .suffix("%"),
+                );
+                ui.label("Gamma");
+                ui.add(Slider::new(&mut cfg.gamma, 0.3..=3.0).step_by(0.1));
+            });
+        }
+    }
+
     fn crop_image(&mut self, ui: &mut egui::Ui, frame: &Arc<YuvFrame>) {
         let Some(selection) = self.selection() else {
             ui.vertical_centered(|ui| {
@@ -1676,10 +1816,16 @@ impl App {
             return;
         };
         let crop = selection.rect;
+        self.enhance_controls(ui);
         let step = crop.w.max(crop.h).div_ceil(PREVIEW_MAX_EDGE).max(1);
-        let (tw, th) = self
-            .crop_view
-            .update(ui.ctx(), frame, Some(selection), step, self.rotation);
+        let (tw, th) = self.crop_view.update(
+            ui.ctx(),
+            frame,
+            Some(selection),
+            step,
+            self.rotation,
+            Some(self.config.enhance),
+        );
         let Some(texture) = &self.crop_view.texture else {
             return;
         };
@@ -1697,7 +1843,7 @@ impl App {
             })
             .unwrap_or_default();
         ui.label(format!(
-            "{nw}×{nh} px at ({}, {}){}{}{}",
+            "{nw}×{nh} px at ({}, {}){}{}{}{}",
             crop.x,
             crop.y,
             if selection.quad.is_some() {
@@ -1710,7 +1856,12 @@ impl App {
             } else {
                 String::new()
             },
-            block
+            block,
+            if self.config.enhance.mode != EnhanceMode::Off {
+                format!(", enhanced ({})", self.config.enhance.mode.label())
+            } else {
+                String::new()
+            },
         ));
         let avail = ui.available_size();
         let scale = (avail.x / nw as f32).min(avail.y / nh as f32);
@@ -1802,7 +1953,10 @@ impl App {
                     .clicked()
                 {
                     let n = self.results.len();
-                    let text = history::joined(self.history.entries.iter().rev().take(n).rev());
+                    let text = history::joined(
+                        self.history.entries.iter().rev().take(n).rev(),
+                        &self.config.ui,
+                    );
                     ui.ctx().copy_text(text);
                     self.say("readings copied");
                 }
@@ -1847,6 +2001,7 @@ impl App {
                             typesetter.as_deref(),
                             &mut entry.typeset,
                             reading_size,
+                            &self.config.ui,
                         ),
                         Err(e) => {
                             ui.colored_label(ui.visuals().error_fg_color, e);
@@ -1895,6 +2050,10 @@ impl App {
         }
         if ctx.input(|i| !i.modifiers.any() && i.key_pressed(Key::H)) {
             self.history_open = !self.history_open;
+        }
+        if ctx.input(|i| !i.modifiers.any() && i.key_pressed(Key::E)) {
+            self.config.enhance.mode = self.config.enhance.mode.cycle();
+            self.say(format!("enhancement: {}", self.config.enhance.mode.label()));
         }
         if tab != 0 {
             self.step_block(tab);
@@ -2109,6 +2268,61 @@ impl eframe::App for App {
     }
 }
 
+/// Amber/red tint for a wavering/hesitant token; `None` for steady (shown plain).
+/// Workbench colours (`.tok-wavering`/`.tok-hesitant` in `hint_index.html`), toned
+/// down to a translucent background since egui text has no dashed/dotted underline.
+fn confidence_tint(c: Confidence) -> Option<Color32> {
+    match c {
+        Confidence::Steady => None,
+        Confidence::Wavering => Some(Color32::from_rgba_unmultiplied(255, 179, 0, 70)),
+        Confidence::Hesitant => Some(Color32::from_rgba_unmultiplied(229, 57, 53, 80)),
+    }
+}
+
+/// One reading's text, token by token when the backend reported tokens that
+/// reconstruct it, tinted by confidence with a hover tooltip; otherwise the whole
+/// text as one label.
+fn reading_text(ui: &mut egui::Ui, r: &Reading, ui_cfg: &UiConfig, px: f32) {
+    let Some(tokens) = r.tokens_if_valid() else {
+        ui.add(egui::Label::new(egui::RichText::new(&r.text).size(px)).wrap());
+        return;
+    };
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for tok in tokens {
+            let confidence = tok.confidence(ui_cfg);
+            let mut text = egui::RichText::new(&tok.text).size(px);
+            if let Some(tint) = confidence_tint(confidence) {
+                text = text.background_color(tint);
+            }
+            let mut hover = format!("{:.0}% confident", tok.prob * 100.0);
+            if !tok.alternates.is_empty() {
+                hover.push_str("\nalternates: ");
+                hover.push_str(
+                    &tok.alternates
+                        .iter()
+                        .map(|a| format!("{:?} ({:.0}%)", a.text, a.prob * 100.0))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            ui.label(text).on_hover_text(hover);
+        }
+    });
+}
+
+/// How many of a reading's tokens are wavering or hesitant, when it has valid
+/// per-token data.
+fn hesitant_count(r: &Reading, ui_cfg: &UiConfig) -> Option<usize> {
+    let tokens = r.tokens_if_valid()?;
+    Some(
+        tokens
+            .iter()
+            .filter(|t| t.confidence(ui_cfg) != Confidence::Steady)
+            .count(),
+    )
+}
+
 /// One backend's answer: every distinct reading with its support, and what did not
 /// come back. Text is selectable, with a copy button, since the point is to use it.
 /// With a typesetter, each reading is rendered on first show and cached in
@@ -2119,6 +2333,7 @@ fn show_transcription(
     typesetter: Option<&dyn Typesetter>,
     typeset: &mut HashMap<usize, Typeset>,
     size_pt: f32,
+    ui_cfg: &UiConfig,
 ) {
     ui.horizontal(|ui| {
         ui.strong(&t.backend);
@@ -2147,10 +2362,13 @@ fn show_transcription(
             {
                 ui.ctx().copy_text(r.text.clone());
             }
+            if let Some(n) = hesitant_count(r, ui_cfg).filter(|&n| n > 0) {
+                ui.weak(format!("{n} hesitant"));
+            }
             let rendered = typesetter.map(|ts| {
                 typeset
                     .entry(i)
-                    .or_insert_with(|| typeset_reading(ui, ts, &r.text, size_pt))
+                    .or_insert_with(|| typeset_reading(ui, ts, r, ui_cfg, size_pt))
             });
             match rendered {
                 Some(Typeset::Image { texture, size }) => {
@@ -2163,7 +2381,7 @@ fn show_transcription(
                 _ => {
                     // Points to egui's logical pixels: 1 pt = 4/3 px at 96 dpi.
                     let px = size_pt * 4.0 / 3.0;
-                    ui.add(egui::Label::new(egui::RichText::new(&r.text).size(px)).wrap());
+                    reading_text(ui, r, ui_cfg, px);
                 }
             }
         });
@@ -2179,17 +2397,33 @@ fn show_transcription(
     }
 }
 
-/// Renders one reading into a texture in the window's text colour.
-fn typeset_reading(ui: &egui::Ui, ts: &dyn Typesetter, text: &str, size_pt: f32) -> Typeset {
+/// Renders one reading into a texture in the window's text colour, tinted by
+/// hesitation when it has valid per-token data. Hesitation tinting is itself a
+/// convenience on top of the rendering, which is a convenience on top of the
+/// text: a tint span that trips up the Typst compile (an untested combination of
+/// token boundaries and markup) falls back to rendering the same text with no
+/// tinting, rather than losing the rendering entirely.
+fn typeset_reading(
+    ui: &egui::Ui,
+    ts: &dyn Typesetter,
+    r: &Reading,
+    ui_cfg: &UiConfig,
+    size_pt: f32,
+) -> Typeset {
     let colour = ui.visuals().text_color();
     let scale = ui.ctx().pixels_per_point() * 1.5;
-    match ts.render(
-        text,
-        TYPESET_WIDTH_PT,
-        size_pt,
-        scale,
-        [colour.r(), colour.g(), colour.b()],
-    ) {
+    let (text, spans) = typeset_source(r, ui_cfg);
+    let rgb = [colour.r(), colour.g(), colour.b()];
+    let mut result = ts.render(&text, &spans, TYPESET_WIDTH_PT, size_pt, scale, rgb);
+    if let Err(e) = &result {
+        if !spans.is_empty() {
+            log::warn!(
+                "typesetting tinted failed, retrying untinted: {e}\ntext: {text:?}\nspans: {spans:?}"
+            );
+            result = ts.render(&text, &[], TYPESET_WIDTH_PT, size_pt, scale, rgb);
+        }
+    }
+    match result {
         Ok((image, scale)) => {
             let (w, h) = (image.width() as usize, image.height() as usize);
             let texture = ui.ctx().load_texture(
@@ -2203,7 +2437,7 @@ fn typeset_reading(ui: &egui::Ui, ts: &dyn Typesetter, text: &str, size_pt: f32)
             }
         }
         Err(e) => {
-            log::warn!("typesetting a reading failed, showing it as text: {e}");
+            log::warn!("typesetting a reading failed, showing it as text: {e}\nsource:\n{text}");
             Typeset::Failed
         }
     }

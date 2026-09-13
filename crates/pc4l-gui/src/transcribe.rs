@@ -11,6 +11,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// Verbatim from halo-workbench `app/handwriting.py`.
@@ -64,13 +65,68 @@ impl Mode {
     }
 }
 
+/// One alternate the model considered instead of the token it went with.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TokenAlt {
+    pub text: String,
+    pub prob: f32,
+}
+
+/// One output token with its probability and runner-up alternates, in the
+/// workbench's sense (`app/handwriting.py::token_confidences()`): >= 0.92 is
+/// "steady", >= 0.6 "wavering", below that "hesitant". Never merged or voted --
+/// each backend that can report tokens reports its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    pub text: String,
+    pub prob: f32,
+    /// Up to 3 runner-up tokens the model gave lower probability, most likely first.
+    pub alternates: Vec<TokenAlt>,
+}
+
 /// One distinct answer and how many of the samples gave it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Reading {
     pub text: String,
     pub count: u32,
     /// The generation hit its token limit: the text may be cut short.
     pub truncated: bool,
+    /// Per-token probabilities, when the backend can report them (today: the
+    /// built-in GLM-OCR). `None` when the backend does not support it.
+    pub tokens: Option<Vec<Token>>,
+}
+
+impl Reading {
+    /// `tokens`, but only when they reconstruct the shown text -- a backend's
+    /// per-token decode can drift from its whole-text decode (BPE merges split
+    /// across a token boundary), and a wrong overlay is worse than none.
+    pub fn tokens_if_valid(&self) -> Option<&[Token]> {
+        let tokens = self.tokens.as_deref()?;
+        let joined: String = tokens.iter().map(|t| t.text.as_str()).collect();
+        (joined.split_whitespace().collect::<Vec<_>>().join(" ")
+            == self.text.split_whitespace().collect::<Vec<_>>().join(" "))
+        .then_some(tokens)
+    }
+}
+
+/// The workbench's three-way confidence bucket for one token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Confidence {
+    Steady,
+    Wavering,
+    Hesitant,
+}
+
+impl Token {
+    pub fn confidence(&self, cfg: &UiConfig) -> Confidence {
+        if self.prob >= cfg.steady_threshold {
+            Confidence::Steady
+        } else if self.prob >= cfg.wavering_threshold {
+            Confidence::Wavering
+        } else {
+            Confidence::Hesitant
+        }
+    }
 }
 
 /// What one backend said about one image.
@@ -205,6 +261,7 @@ impl BackendConfig {
                 samples: samples.max(1),
                 temperature,
                 max_tokens,
+                use_max_completion_tokens: AtomicBool::new(false),
             }),
             BackendConfig::HintApi {
                 name,
@@ -301,6 +358,12 @@ pub struct UiConfig {
     pub scale: f32,
     /// The readings' text size in points (scaled by `scale` like everything else).
     pub reading_size: f32,
+    /// A token at or above this probability is shown as steady (no tint). Workbench
+    /// default: 0.92.
+    pub steady_threshold: f32,
+    /// A token at or above this (but below `steady_threshold`) is "wavering"
+    /// (amber); below it, "hesitant" (red). Workbench default: 0.6.
+    pub wavering_threshold: f32,
 }
 
 impl Default for UiConfig {
@@ -308,6 +371,8 @@ impl Default for UiConfig {
         Self {
             scale: 1.0,
             reading_size: 20.0,
+            steady_threshold: 0.92,
+            wavering_threshold: 0.6,
         }
     }
 }
@@ -322,6 +387,8 @@ pub struct Config {
     pub prompts: PromptsConfig,
     #[serde(default)]
     pub ui: UiConfig,
+    #[serde(default)]
+    pub enhance: crate::enhance::EnhanceConfig,
 }
 
 impl Config {
@@ -408,6 +475,7 @@ impl Default for Config {
             layout: LayoutConfig::default(),
             prompts: PromptsConfig::default(),
             ui: UiConfig::default(),
+            enhance: crate::enhance::EnhanceConfig::default(),
         }
     }
 }
@@ -423,6 +491,11 @@ struct OpenAiBackend {
     samples: u32,
     temperature: f32,
     max_tokens: u32,
+    /// Some models (OpenAI's `gpt-5` family, as of 2026) reject `max_tokens` and
+    /// want `max_completion_tokens` instead; discovered from the first request's
+    /// error and remembered so later requests (more samples, later reads) do not
+    /// pay for a failed attempt again.
+    use_max_completion_tokens: AtomicBool,
 }
 
 fn agent() -> ureq::Agent {
@@ -459,52 +532,128 @@ impl Transcriber for OpenAiBackend {
         } else {
             self.temperature
         };
-        let body = serde_json::json!({
-            "model": self.model,
-            "temperature": temperature,
-            "max_tokens": self.max_tokens,
-            "messages": [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": data_url(png)}},
-                {"type": "text", "text": prompt},
-            ]}],
-        });
         let agent = agent();
         let url = format!("{}/chat/completions", self.base_url);
         let mut samples = Vec::new();
         for _ in 0..self.samples {
-            let mut request = agent.post(&url);
-            if let Some(key) = &self.api_key {
-                request = request.header("authorization", format!("Bearer {key}"));
-            }
-            let mut response = request
-                .send_json(&body)
-                .with_context(|| format!("{} did not answer", self.base_url))?;
-            let status = response.status().as_u16();
-            let payload: serde_json::Value =
-                response.body_mut().read_json().with_context(|| {
-                    format!("{}: unreadable response (HTTP {status})", self.base_url)
-                })?;
-            if status >= 300 {
-                let detail = payload
-                    .pointer("/error/message")
-                    .or_else(|| payload.get("error"))
-                    .map(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .unwrap_or_else(|| v.to_string())
-                    })
-                    .unwrap_or_default();
-                bail!("{} answered HTTP {status} {detail}", self.base_url);
-            }
+            let payload = self.send_one(&agent, &url, temperature, prompt, png)?;
             samples.push(parse_choice(&payload)?);
         }
         Ok(group(&self.name, samples, started.elapsed()))
     }
 }
 
+impl OpenAiBackend {
+    /// One request body: `logprobs`/`top_logprobs` for hesitation tinting (a
+    /// server that does not support them either ignores the fields or omits
+    /// `logprobs` from its response, both handled by `parse_logprobs_tokens`
+    /// returning `None`), and `max_tokens` or `max_completion_tokens` depending
+    /// on `use_completion_tokens`.
+    fn body(
+        &self,
+        temperature: f32,
+        prompt: &str,
+        png: &[u8],
+        use_completion_tokens: bool,
+    ) -> serde_json::Value {
+        let mut body = serde_json::json!({
+            "model": self.model,
+            "temperature": temperature,
+            "logprobs": true,
+            "top_logprobs": 3,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": data_url(png)}},
+                {"type": "text", "text": prompt},
+            ]}],
+        });
+        let field = if use_completion_tokens {
+            "max_completion_tokens"
+        } else {
+            "max_tokens"
+        };
+        body[field] = serde_json::json!(self.max_tokens);
+        body
+    }
+
+    /// Posts one request, retrying once with `max_completion_tokens` in place of
+    /// `max_tokens` if the server rejects the latter the way OpenAI's `gpt-5`
+    /// family does (as of 2026) -- remembered on `self` so later requests, in
+    /// this read and later ones, do not pay for the failed attempt again.
+    fn send_one(
+        &self,
+        agent: &ureq::Agent,
+        url: &str,
+        temperature: f32,
+        prompt: &str,
+        png: &[u8],
+    ) -> Result<serde_json::Value> {
+        let use_completion = self.use_max_completion_tokens.load(Ordering::Relaxed);
+        let body = self.body(temperature, prompt, png, use_completion);
+        let (status, payload) = self.send(agent, url, &body)?;
+        if status < 300 {
+            return Ok(payload);
+        }
+        if !use_completion && rejects_max_tokens(&payload) {
+            self.use_max_completion_tokens
+                .store(true, Ordering::Relaxed);
+            let body = self.body(temperature, prompt, png, true);
+            let (status, payload) = self.send(agent, url, &body)?;
+            if status < 300 {
+                return Ok(payload);
+            }
+            return Err(response_error(&self.base_url, status, &payload));
+        }
+        Err(response_error(&self.base_url, status, &payload))
+    }
+
+    fn send(
+        &self,
+        agent: &ureq::Agent,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<(u16, serde_json::Value)> {
+        let mut request = agent.post(url);
+        if let Some(key) = &self.api_key {
+            request = request.header("authorization", format!("Bearer {key}"));
+        }
+        let mut response = request
+            .send_json(body)
+            .with_context(|| format!("{} did not answer", self.base_url))?;
+        let status = response.status().as_u16();
+        let payload: serde_json::Value = response
+            .body_mut()
+            .read_json()
+            .with_context(|| format!("{}: unreadable response (HTTP {status})", self.base_url))?;
+        Ok((status, payload))
+    }
+}
+
+/// Whether an error response is OpenAI's own "use max_completion_tokens instead"
+/// rejection -- a structured error (`code`/`param`), not a message-text match, so
+/// it only fires on the specific, documented shape rather than guessing from
+/// prose.
+fn rejects_max_tokens(payload: &serde_json::Value) -> bool {
+    payload.pointer("/error/param").and_then(|v| v.as_str()) == Some("max_tokens")
+        && payload.pointer("/error/code").and_then(|v| v.as_str()) == Some("unsupported_parameter")
+}
+
+fn response_error(base_url: &str, status: u16, payload: &serde_json::Value) -> anyhow::Error {
+    let detail = payload
+        .pointer("/error/message")
+        .or_else(|| payload.get("error"))
+        .map(|v| {
+            v.as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| v.to_string())
+        })
+        .unwrap_or_default();
+    anyhow!("{base_url} answered HTTP {status} {detail}")
+}
+
 struct Sample {
     text: String,
     truncated: bool,
+    tokens: Option<Vec<Token>>,
 }
 
 fn parse_choice(payload: &serde_json::Value) -> Result<Sample> {
@@ -518,7 +667,101 @@ fn parse_choice(payload: &serde_json::Value) -> Result<Sample> {
         .trim()
         .to_string();
     let truncated = choice.get("finish_reason").and_then(|f| f.as_str()) == Some("length");
-    Ok(Sample { text, truncated })
+    let tokens = parse_logprobs_tokens(choice);
+    Ok(Sample {
+        text,
+        truncated,
+        tokens,
+    })
+}
+
+/// Bytes of one token, appended to a running buffer and decoded as far as valid
+/// UTF-8 allows -- a multi-byte character can be split across adjacent tokens, so
+/// decoding each token's bytes on their own can produce replacement characters
+/// where a whole character has not arrived yet.
+fn decode_incremental(buf: &mut Vec<u8>) -> String {
+    match std::str::from_utf8(buf) {
+        Ok(s) => {
+            let s = s.to_string();
+            buf.clear();
+            s
+        }
+        Err(e) => {
+            let valid_up_to = e.valid_up_to();
+            let s = std::str::from_utf8(&buf[..valid_up_to])
+                .expect("valid_up_to bounds valid UTF-8")
+                .to_string();
+            buf.drain(..valid_up_to);
+            s
+        }
+    }
+}
+
+/// `token`'s `bytes`, or its `token` string when the server omitted `bytes`.
+fn logprob_bytes(entry: &serde_json::Value) -> Vec<u8> {
+    entry
+        .get("bytes")
+        .and_then(|b| b.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64())
+                .map(|v| v as u8)
+                .collect()
+        })
+        .unwrap_or_else(|| {
+            entry
+                .get("token")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .as_bytes()
+                .to_vec()
+        })
+}
+
+/// Per-token probabilities from an OpenAI-style `logprobs.content`
+/// (`{token, logprob, bytes, top_logprobs: [{token, logprob, bytes}, ...]}` per
+/// entry); `None` when the server did not return one (an older or non-conforming
+/// endpoint).
+fn parse_logprobs_tokens(choice: &serde_json::Value) -> Option<Vec<Token>> {
+    let content = choice.pointer("/logprobs/content")?.as_array()?;
+    if content.is_empty() {
+        return None;
+    }
+    let mut buf: Vec<u8> = Vec::new();
+    let mut tokens = Vec::with_capacity(content.len());
+    for entry in content {
+        buf.extend(logprob_bytes(entry));
+        let text = decode_incremental(&mut buf);
+        let prob = entry
+            .get("logprob")
+            .and_then(|v| v.as_f64())
+            .map(|lp| lp.exp() as f32)
+            .unwrap_or(0.0);
+        let alternates = entry
+            .get("top_logprobs")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|alt| {
+                        let alt_prob = alt.get("logprob").and_then(|v| v.as_f64())?.exp() as f32;
+                        // An alternate is a candidate the model did not go with, not
+                        // part of the actual byte stream, so it is decoded on its
+                        // own rather than through the running buffer above.
+                        Some(TokenAlt {
+                            text: String::from_utf8_lossy(&logprob_bytes(alt)).into_owned(),
+                            prob: alt_prob,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        tokens.push(Token {
+            text,
+            prob,
+            alternates,
+        });
+    }
+    Some(tokens)
 }
 
 /// Whitespace-insensitive key, as the workbench's `normalise()`: two samples that
@@ -551,6 +794,7 @@ fn group(backend: &str, samples: Vec<Sample>, elapsed: Duration) -> Transcriptio
                     text: s.text,
                     count: 1,
                     truncated: s.truncated,
+                    tokens: s.tokens,
                 });
             }
         }
@@ -635,6 +879,8 @@ fn parse_hint_response(
                 .get("truncated")
                 .and_then(|t| t.as_bool())
                 .unwrap_or(false),
+            // TODO: the hint API can report per-token confidences too; not parsed yet.
+            tokens: None,
         })
         .collect();
     let samples = payload
@@ -663,6 +909,7 @@ mod tests {
         Sample {
             text: text.into(),
             truncated: false,
+            tokens: None,
         }
     }
 
@@ -681,12 +928,14 @@ mod tests {
                 Reading {
                     text: "the".into(),
                     count: 3,
-                    truncated: false
+                    truncated: false,
+                    tokens: None
                 },
                 Reading {
                     text: "tho".into(),
                     count: 1,
-                    truncated: false
+                    truncated: false,
+                    tokens: None
                 },
             ]
         );
@@ -696,12 +945,53 @@ mod tests {
     }
 
     #[test]
+    fn recognises_the_max_tokens_rejection() {
+        let v = serde_json::json!({"error": {
+            "message": "Unsupported parameter: 'max_tokens' is not supported with \
+                         this model. Use 'max_completion_tokens' instead.",
+            "type": "invalid_request_error",
+            "param": "max_tokens",
+            "code": "unsupported_parameter",
+        }});
+        assert!(rejects_max_tokens(&v));
+        // A different unsupported-parameter error must not trigger the retry.
+        let other = serde_json::json!({"error": {
+            "param": "temperature",
+            "code": "unsupported_parameter",
+        }});
+        assert!(!rejects_max_tokens(&other));
+        assert!(!rejects_max_tokens(&serde_json::json!({})));
+    }
+
+    #[test]
     fn parses_openai_choice_and_length_stop() {
         let v = serde_json::json!({"choices": [{"message": {"content": " x^2 "}, "finish_reason": "length"}]});
         let c = parse_choice(&v).unwrap();
         assert_eq!(c.text, "x^2");
         assert!(c.truncated);
+        assert!(c.tokens.is_none());
         assert!(parse_choice(&serde_json::json!({"choices": []})).is_err());
+    }
+
+    #[test]
+    fn parses_openai_logprobs_with_split_multibyte_char() {
+        // "µ" (U+00B5, 2 bytes in UTF-8: 0xC2 0xB5) split across two tokens, as a
+        // BPE tokenizer can do; the incremental decoder should still reconstruct it
+        // rather than emit a replacement character on the first token.
+        let v = serde_json::json!({"choices": [{
+            "message": {"content": "µm"},
+            "logprobs": {"content": [
+                {"token": "\u{FFFD}", "logprob": -0.1, "bytes": [0xC2],
+                 "top_logprobs": [{"token": "\u{FFFD}", "logprob": -0.1, "bytes": [0xC2]}]},
+                {"token": "\u{FFFD}m", "logprob": -0.2, "bytes": [0xB5, b'm']},
+            ]},
+        }]});
+        let c = parse_choice(&v).unwrap();
+        let tokens = c.tokens.unwrap();
+        assert_eq!(tokens.len(), 2);
+        assert_eq!(tokens[0].text, "");
+        assert_eq!(tokens[1].text, "µm");
+        assert!((tokens[0].prob - (-0.1_f64).exp() as f32).abs() < 1e-6);
     }
 
     #[test]

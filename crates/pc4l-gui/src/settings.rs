@@ -70,6 +70,27 @@ pub fn show(ctx: &egui::Context, open: &mut bool, draft: &mut Config) -> Outcome
                         )
                         .on_hover_text("the transcriptions, typeset or raw; scales with the window");
                     });
+                    ui.horizontal(|ui| {
+                        ui.label("Steady threshold");
+                        ui.add(
+                            Slider::new(&mut draft.ui.steady_threshold, 0.5..=1.0)
+                                .step_by(0.01)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text(
+                            "a token at or above this probability is shown untinted; workbench default 0.92",
+                        );
+                        ui.label("Wavering threshold");
+                        ui.add(
+                            Slider::new(&mut draft.ui.wavering_threshold, 0.0..=0.9)
+                                .step_by(0.01)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text(
+                            "below steady but at or above this is amber (\"wavering\"); below it is \
+                             red (\"hesitant\"); workbench default 0.6",
+                        );
+                    });
                     ui.add_space(8.0);
 
                     ui.heading("Backends");

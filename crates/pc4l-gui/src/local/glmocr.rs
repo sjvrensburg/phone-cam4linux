@@ -7,6 +7,7 @@
 //! output; the graph interface (including the undocumented `num_logits_to_keep`
 //! input) was read off the export itself.
 
+use crate::transcribe::{Token, TokenAlt};
 use anyhow::{anyhow, bail, Context, Result};
 use image::{imageops::FilterType, RgbImage};
 use ndarray::{Array, ArrayD, IxDyn};
@@ -290,6 +291,18 @@ pub struct Generated {
     pub text: String,
     /// Stopped at `max_tokens` rather than at an end-of-sequence token.
     pub truncated: bool,
+    /// One entry per output token (not including the end-of-sequence token itself),
+    /// with its probability and runner-up alternates -- a softmax over the same
+    /// logits the greedy step already reads, so this costs nothing extra to produce.
+    pub tokens: Vec<Token>,
+}
+
+/// The chosen token id and probability from one decode step, plus up to 3 runner-up
+/// ids the model gave lower probability.
+struct StepToken {
+    id: u32,
+    prob: f32,
+    alternates: Vec<(u32, f32)>,
 }
 
 pub struct Model {
@@ -465,22 +478,24 @@ impl Model {
         let t_prefill = t0.elapsed();
 
         let mut generated: Vec<u32> = Vec::new();
+        let mut steps: Vec<StepToken> = Vec::new();
         let mut truncated = false;
         loop {
-            if eos.contains(&next) {
+            if eos.contains(&next.id) {
                 break;
             }
-            generated.push(next);
+            generated.push(next.id);
             if generated.len() >= max_tokens {
                 truncated = true;
                 break;
             }
-            let e = self.embed_ids(&[next])?;
+            let e = self.embed_ids(&[next.id])?;
             let p = (past as i64) + rope_delta;
             let pos1 = Array::from_shape_vec(IxDyn(&[3, 1, 1]), vec![p, p, p])?;
             let (tok, new_kv) = self.step(&e, &pos1, past, &kv)?;
             kv = new_kv;
             past += 1;
+            steps.push(next);
             next = tok;
         }
         let total = t0.elapsed();
@@ -497,9 +512,40 @@ impl Model {
             .tokenizer
             .decode(&generated, true)
             .map_err(|e| anyhow!("decode: {e}"))?;
+        let tokens = steps
+            .into_iter()
+            .map(|s| self.token_with_text(s))
+            .collect::<Result<Vec<_>>>()?;
         Ok(Generated {
             text: text.trim().to_string(),
             truncated,
+            tokens,
+        })
+    }
+
+    /// Decodes a step's id and its alternates' ids to text. A lone id can decode
+    /// slightly differently than it would inside the full sequence (BPE merges
+    /// spanning a boundary); [`Reading::tokens_if_valid`] catches the rare case
+    /// where this drifts from the whole-text decode.
+    fn token_with_text(&self, step: StepToken) -> Result<Token> {
+        let decode_one = |id: u32| -> Result<String> {
+            self.tokenizer
+                .decode(&[id], true)
+                .map_err(|e| anyhow!("decode: {e}"))
+        };
+        Ok(Token {
+            text: decode_one(step.id)?,
+            prob: step.prob,
+            alternates: step
+                .alternates
+                .into_iter()
+                .map(|(id, prob)| -> Result<TokenAlt> {
+                    Ok(TokenAlt {
+                        text: decode_one(id)?,
+                        prob,
+                    })
+                })
+                .collect::<Result<_>>()?,
         })
     }
 
@@ -528,7 +574,7 @@ impl Model {
         pos: &ArrayD<i64>,
         past: usize,
         kv: &[DynValue],
-    ) -> Result<(u32, Vec<DynValue>)> {
+    ) -> Result<(StepToken, Vec<DynValue>)> {
         let t = embeds.shape()[1];
         let mask: ArrayD<i64> = Array::ones(IxDyn(&[1, past + t]));
         let embeds = float_value(embeds.clone(), self.embeds_type)?;
@@ -557,16 +603,31 @@ impl Model {
         let logits = extract_f32(&out["logits"])?;
         let last = logits.index_axis(ndarray::Axis(1), logits.shape()[1] - 1);
         let last = last.index_axis(ndarray::Axis(0), 0);
-        let (tok, _) = last
-            .iter()
-            .enumerate()
-            .fold((0usize, f32::NEG_INFINITY), |b, (i, &v)| {
-                if v > b.1 {
-                    (i, v)
-                } else {
-                    b
+        // Top-4 by logit (the chosen token plus 3 runner-ups) found in one linear
+        // pass, then turned into probabilities with a second pass for the softmax
+        // normaliser -- avoids sorting the whole vocabulary just for the top few.
+        let max_logit = last.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut top: [(usize, f32); 4] = [(0, f32::NEG_INFINITY); 4];
+        for (i, &v) in last.iter().enumerate() {
+            if v > top[3].1 {
+                top[3] = (i, v);
+                let mut j = 3;
+                while j > 0 && top[j].1 > top[j - 1].1 {
+                    top.swap(j, j - 1);
+                    j -= 1;
                 }
-            });
+            }
+        }
+        let sum_exp: f32 = last.iter().map(|&v| (v - max_logit).exp()).sum();
+        let prob_of = |logit: f32| (logit - max_logit).exp() / sum_exp;
+        let token = StepToken {
+            id: top[0].0 as u32,
+            prob: prob_of(top[0].1),
+            alternates: top[1..]
+                .iter()
+                .map(|&(i, v)| (i as u32, prob_of(v)))
+                .collect(),
+        };
         let mut new_kv = Vec::with_capacity(2 * layers);
         for l in 0..layers {
             for part in ["key", "value"] {
@@ -577,7 +638,7 @@ impl Model {
                 );
             }
         }
-        Ok((tok as u32, new_kv))
+        Ok((token, new_kv))
     }
 }
 
