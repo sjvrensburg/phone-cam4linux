@@ -1,4 +1,4 @@
-//! The Settings window: everything in `~/.config/pc4l/gui.toml`, editable in place --
+//! The Settings window: everything in `~/.config/squigl/gui.toml`, editable in place --
 //! the window's scale, the transcription backends (an OpenAI-compatible endpoint's
 //! URL, model and key go here), and the block detector. Edits are made to a draft;
 //! Save writes the file and applies it, Cancel drops the draft.

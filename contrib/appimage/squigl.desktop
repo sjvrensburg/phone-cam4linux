@@ -1,11 +1,11 @@
 [Desktop Entry]
 Type=Application
-Name=Phone Camera
+Name=Squigl
 GenericName=Document camera
 Comment=Use an Android phone's camera as a document camera: live view, crop, capture, read handwriting
-Exec=pc4l-gui
-Icon=pc4l-gui
+Exec=squigl
+Icon=squigl
 Terminal=false
 Categories=Graphics;Photography;Utility;
 Keywords=camera;phone;scrcpy;document;OCR;handwriting;
-StartupWMClass=pc4l-gui
+StartupWMClass=squigl

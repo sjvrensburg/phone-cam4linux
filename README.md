@@ -1,15 +1,15 @@
-# phone-cam4linux
+# Squigl
 
-[![CI](https://github.com/sjvrensburg/phone-cam4linux/actions/workflows/ci.yml/badge.svg)](https://github.com/sjvrensburg/phone-cam4linux/actions/workflows/ci.yml)
+[![CI](https://github.com/sjvrensburg/squigl/actions/workflows/ci.yml/badge.svg)](https://github.com/sjvrensburg/squigl/actions/workflows/ci.yml)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Use an Android phone as a camera on Linux, without the full `scrcpy` client:
+Use an Android phone as a document camera on Linux, without the full `scrcpy` client:
 
-- **`pc4l`** -- a CLI that streams the phone's camera into a V4L2 (`/dev/videoN`)
-  device, so browsers, OBS and any webcam app can use it.
-- **`pc4l-gui`** -- a desktop document-camera window: live view, the phone's own zoom,
+- **`squigl`** -- a desktop document-camera window: live view, the phone's own zoom,
   a drag-to-zoom region, capture, save, and handwriting transcription with a built-in
   model (GLM-OCR on your GPU) or any OpenAI-compatible vision endpoint.
+- **`squigl-cli`** -- a headless CLI that streams the phone's camera into a V4L2
+  (`/dev/videoN`) device, so browsers, OBS and any webcam app can use it too.
 - **`phone-cam4linux`** -- the Rust library both are built on.
 
 Linux only (V4L2 is Linux; the GUI is Linux-first). Android 12+ on the phone.
@@ -40,7 +40,7 @@ mirroring, audio, or input control.
   debugging authorized.
 - Android 12+ on the phone (camera-as-video-source requires it).
 - `v4l2loopback` kernel module installed (`v4l2loopback-dkms` on most distros).
-  If the target `/dev/videoN` is missing, `pc4l` creates it via `pkexec` (which
+  If the target `/dev/videoN` is missing, `squigl-cli` creates it via `pkexec` (which
   prompts for your password each time). To avoid that permanently, create the device
   at boot instead:
   ```
@@ -54,19 +54,19 @@ mirroring, audio, or input control.
 
 **AppImage** (x86_64 Linux with glibc 2.38 or newer -- Ubuntu 24.04, Fedora 39, Debian
 13 and later -- and a CPU with AVX2, both requirements of the built-in models' prebuilt
-ONNX Runtime; `adb` installed): download `pc4l-gui-<version>-x86_64.AppImage` from the
-[releases page](https://github.com/sjvrensburg/phone-cam4linux/releases), `chmod +x`,
+ONNX Runtime; `adb` installed): download `squigl-<version>-x86_64.AppImage` from the
+[releases page](https://github.com/sjvrensburg/squigl/releases), `chmod +x`,
 run. It carries the GUI, the CLI and the GPU provider; the built-in models (~780 MB)
-are fetched on first use into `~/.cache/pc4l/models/`, or extract
-`pc4l-models-<version>.tar.gz` next to the AppImage (a `models/` directory beside it)
+are fetched on first use into `~/.cache/squigl/models/`, or extract
+`squigl-models-<version>.tar.gz` next to the AppImage (a `models/` directory beside it)
 to have them offline. A desktop entry and icon are in `contrib/appimage/` (or let an
 AppImage launcher such as AppImageLauncher integrate it).
 
-**Release archive** (same requirements): `pc4l-<version>-x86_64-linux.tar.gz` contains
-`pc4l`, `pc4l-gui`, the `libwebgpu_dawn.so` the GUI's GPU path needs (found next to the
-binary), and `contrib/`. Extract `pc4l-models-<version>.tar.gz` into the same directory
-for the models offline (`models/` beside the binaries). `SHA256SUMS.txt` covers
-everything. `contrib/appimage/build.sh` builds the AppImage from a release build.
+**Release archive** (same requirements): `squigl-<version>-x86_64-linux.tar.gz` contains
+`squigl`, `squigl-cli`, the `libwebgpu_dawn.so` the GUI's GPU path needs (found next to
+the binary), and `contrib/`. Extract `squigl-models-<version>.tar.gz` into the same
+directory for the models offline (`models/` beside the binaries). `SHA256SUMS.txt`
+covers everything. `contrib/appimage/build.sh` builds the AppImage from a release build.
 
 **From source**:
 
@@ -77,20 +77,20 @@ cargo build --release                      # or: cargo build --release --feature
 needs a Rust toolchain, `nasm` (OpenH264 assembly), `libclang` (bindgen for the V4L2
 bindings), and for the GUI `libxkbcommon` and `libwayland` development files. The first
 build downloads the pinned `scrcpy-server` jar and (for the GUI) prebuilt ONNX Runtime
-binaries; `cargo build --release -p pc4l-gui --no-default-features` skips the latter,
-the built-in models and the Typst typesetting. `pc4l-gui --fetch-model DIR` downloads the models into `DIR/` with
+binaries; `cargo build --release -p squigl --no-default-features` skips the latter,
+the built-in models and the Typst typesetting. `squigl --fetch-model DIR` downloads the models into `DIR/` with
 checksum verification, for machines that will be offline (set `HF_TOKEN` to a Hugging
 Face token if anonymous downloads are being rate-limited; the files are public).
 
 ## Usage
 
 ```
-./target/release/pc4l --list-sizes         # see what the phone offers
-./target/release/pc4l --facing back --resolution max --bitrate 30 --device /dev/video10
+./target/release/squigl-cli --list-sizes         # see what the phone offers
+./target/release/squigl-cli --facing back --resolution max --bitrate 30 --device /dev/video10
 ```
 
 Then point any V4L2-consuming app (browser, `ffplay`, OBS, etc.) at `/dev/video10`.
-`pc4l` keeps running until Ctrl-C: if the phone disconnects, the server dies, or the
+`squigl-cli` keeps running until Ctrl-C: if the phone disconnects, the server dies, or the
 stream stalls, it reconnects with backoff while keeping the V4L2 device open, so
 consumers don't lose the camera (`--no-reconnect` to exit instead).
 
@@ -124,17 +124,17 @@ Sizes that aren't a multiple of 8 in both dimensions (e.g. 4000x2250) are listed
 phone but unusable: scrcpy rounds them for the encoder and the camera then refuses the
 rounded size. `--list-sizes` marks these; `--resolution max` skips them.
 
-### Desktop window (`pc4l-gui`)
+### Desktop window (`squigl`)
 
-`pc4l-gui` is a document-camera window over the same pipeline, with no V4L2 device
+`squigl` is a document-camera window over the same pipeline, with no V4L2 device
 needed: a live view, a drag-to-select region shown at native pixels beside it (that
 *is* the zoom), Capture to freeze the frame, and Save PNG for the region or the whole
 frame at full resolution.
 
 ```
-./target/release/pc4l-gui --rotate 270           # phone on a stand, mounted sideways
-./target/release/pc4l-gui --device /dev/video10  # also feed the loopback device
-./target/release/pc4l-gui --zoom 2               # start at 2x
+./target/release/squigl --rotate 270           # phone on a stand, mounted sideways
+./target/release/squigl --device /dev/video10  # also feed the loopback device
+./target/release/squigl --zoom 2               # start at 2x
 ```
 
 When the phone reports a zoom range for the camera, the toolbar has a **Zoom** slider
@@ -151,13 +151,13 @@ against the ink at a glance; the `typeset` checkbox shows the raw text instead, 
 always copies the raw text, and anything that does not convert stays text. Every
 reading of the session is kept: **history** (`H`) lists them all with the capture they
 came from, **copy all** puts the current list on the clipboard in page order, and
-**Save as Markdown** writes the session to `~/Pictures/pc4l/pc4l-readings-<time>.md`,
+**Save as Markdown** writes the session to `~/Pictures/squigl/squigl-readings-<time>.md`,
 a section per capture. **2nd opinion** (`shift+enter`) reads the same thing again with
 the next backend in the list and lists it alongside -- the two are never merged. The
 readings' text size is a Settings value (`[ui] reading_size`, points) and scales with
 the window. (The
 `math` cargo feature, on by default; about 40 MB of the binary.) Backends live in
-`~/.config/pc4l/gui.toml` (written with defaults on first run) and are edited in the
+`~/.config/squigl/gui.toml` (written with defaults on first run) and are edited in the
 window's **Settings** (`ctrl+,`) -- an OpenAI-compatible endpoint's URL, model and API
 key go there -- along with the **prompts** sent to the OpenAI-compatible and built-in
 backends (the defaults are the ones every model comparison was made with; the hint
@@ -193,16 +193,16 @@ turns it off, picks the device, and sets the score threshold (0.4: handwriting s
 lower than the printed pages it was trained on).
 
 The built-in models' files (~658 MB for GLM-OCR, 130 MB for the layout model) are not
-inside the binary. Each is looked for in `$PC4L_MODEL_DIR/<name>/`, then `models/<name>/` next to the AppImage or the
+inside the binary. Each is looked for in `$SQUIGL_MODEL_DIR/<name>/`, then `models/<name>/` next to the AppImage or the
 executable (how a release can ship them), then
-`~/.cache/pc4l/models/<name>/` (`glm-ocr-onnx-q4f16`, `pp-doclayoutv3-onnx`); if
+`~/.cache/squigl/models/<name>/` (`glm-ocr-onnx-q4f16`, `pp-doclayoutv3-onnx`); if
 none has it, it is downloaded there on first run from a pinned Hugging Face revision,
 each file verified against a sha256 compiled into the app, with progress shown in the
 window. Reads and detection are refused until the model is ready.
 
 Keys: `space` capture/retake, `enter` read, `L` block mode on/off, `tab`/`shift+tab`
 next/previous block, `ctrl+enter` read all blocks, `esc` clear the region (then
-retake), `R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/pc4l/`, or `--save-dir`),
+retake), `R`/`shift+R` rotate, `ctrl+S` save (to `~/Pictures/squigl/`, or `--save-dir`),
 `shift+enter` second opinion, `ctrl+,` settings, `H` reading history,
 `ctrl+plus`/`ctrl+minus`/`ctrl+0` window scale.
 Phone zoom: the slider, the wheel over the preview, `+`/`-`, `0` to reset. The
@@ -210,21 +210,21 @@ region: drag inside it to move it, drag a corner handle to reshape it, arrow key
 nudge (`shift` for one pixel), `[`/`]` or the wheel over the zoomed view to shrink/grow
 it. `--resolution` defaults to
 `max`; `--facing`, `--connect`, `--serial`, `--bitrate`, `--fps` and `--decoder`
-are as for `pc4l`. It reconnects with backoff like the CLI.
+are as for `squigl-cli`. It reconnects with backoff like the CLI.
 
 ### Wireless (TCP/IP ADB)
 
 Once, with the phone on USB and Wi-Fi:
 
 ```
-pc4l --tcpip            # switches adbd to TCP mode, prints e.g. 192.168.1.53:5555
+squigl-cli --tcpip            # switches adbd to TCP mode, prints e.g. 192.168.1.53:5555
 ```
 
 Then unplug and stream over Wi-Fi (the `adb connect` is re-issued on every reconnect,
 so a Wi-Fi hiccup is recovered like a cable wiggle):
 
 ```
-pc4l --connect 192.168.1.53 --resolution 1920x1080
+squigl-cli --connect 192.168.1.53 --resolution 1920x1080
 ```
 
 TCP mode persists until the phone reboots; `adb usb` switches back. 1080p at 30 Mbit/s
@@ -232,15 +232,15 @@ streams fine over a decent Wi-Fi link; drop `--bitrate` if you see stalls.
 
 ### Running as a service
 
-`contrib/systemd/pc4l.service` is a systemd *user* unit that keeps the camera exposed
+`contrib/systemd/squigl.service` is a systemd *user* unit that keeps the camera exposed
 whenever the phone is reachable (see the comments in the file for install steps). It
-relies on the boot-time device from `contrib/install-system-config.sh` and on `pc4l`
-being installed (`cargo install --path crates/pc4l [--features ffmpeg]`).
+relies on the boot-time device from `contrib/install-system-config.sh` and on `squigl-cli`
+being installed (`cargo install --path crates/squigl-cli [--features ffmpeg]`).
 
 ### Testing the V4L2 sink without a phone
 
 ```
-./target/release/pc4l --test-pattern --device /dev/video10
+./target/release/squigl-cli --test-pattern --device /dev/video10
 ```
 
 Writes a synthetic cycling color-bar pattern instead of a real camera stream --

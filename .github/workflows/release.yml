@@ -1,10 +1,10 @@
 name: Release
 
 # Tag `vX.Y.Z` -> a GitHub release with:
-#   pc4l-vX.Y.Z-x86_64-linux.tar.gz    pc4l, pc4l-gui, libwebgpu_dawn.so, docs, contrib/
-#   pc4l-gui-vX.Y.Z-x86_64.AppImage    the GUI as one file (contrib/appimage/build.sh)
-#   pc4l-models-vX.Y.Z.tar.gz          the built-in models (~780 MB), extract to models/
-# Extracting both into one directory gives pc4l-gui the models beside the binary, with no
+#   squigl-vX.Y.Z-x86_64-linux.tar.gz    squigl, squigl-cli, libwebgpu_dawn.so, docs, contrib/
+#   squigl-vX.Y.Z-x86_64.AppImage        the GUI as one file (contrib/appimage/build.sh)
+#   squigl-models-vX.Y.Z.tar.gz          the built-in models (~780 MB), extract to models/
+# Extracting both into one directory gives squigl the models beside the binary, with no
 # download at first run. The model archive is built by the binary's own --fetch-model, so it
 # is verified against the same checksums the app enforces.
 
@@ -22,7 +22,7 @@ env:
 jobs:
   build:
     name: linux x86_64
-    # pyke's prebuilt ONNX Runtime (pc4l-gui) links against glibc 2.38 / GLIBCXX 3.4.32,
+    # pyke's prebuilt ONNX Runtime (squigl) links against glibc 2.38 / GLIBCXX 3.4.32,
     # so the archive needs a 2024-or-newer distro; 22.04 fails at link time.
     runs-on: ubuntu-24.04
     steps:
@@ -50,15 +50,15 @@ jobs:
             "https://github.com/Genymobile/scrcpy/releases/download/v${version}/scrcpy-server-v${version}"
 
       - name: Build
-        run: cargo build --release -p pc4l -p pc4l-gui
+        run: cargo build --release -p squigl-cli -p squigl
 
       - name: Package binaries
         id: pkg
         run: |
           tag="${GITHUB_REF_NAME}"
-          name="pc4l-${tag}-x86_64-linux"
+          name="squigl-${tag}-x86_64-linux"
           mkdir -p "dist/${name}"
-          cp target/release/pc4l target/release/pc4l-gui "dist/${name}/"
+          cp target/release/squigl target/release/squigl-cli "dist/${name}/"
           # ort leaves the WebGPU provider as a symlink into its cache; ship the real file.
           cp -L target/release/libwebgpu_dawn.so "dist/${name}/"
           cp README.md LICENSE NOTICE "dist/${name}/"
@@ -87,10 +87,10 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           mkdir -p dist/model/models
-          target/release/pc4l-gui --fetch-model dist/model/models
+          target/release/squigl --fetch-model dist/model/models
           ls dist/model/models
-          tar -C dist/model -czf "dist/pc4l-models-${GITHUB_REF_NAME}.tar.gz" models
-          echo "archive=dist/pc4l-models-${GITHUB_REF_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
+          tar -C dist/model -czf "dist/squigl-models-${GITHUB_REF_NAME}.tar.gz" models
+          echo "archive=dist/squigl-models-${GITHUB_REF_NAME}.tar.gz" >> "$GITHUB_OUTPUT"
 
       - name: Checksums
         run: |
@@ -101,8 +101,8 @@ jobs:
       - name: Smoke test the archive
         run: |
           mkdir -p /tmp/smoke && tar -C /tmp/smoke -xzf "${{ steps.pkg.outputs.archive }}"
-          /tmp/smoke/${{ steps.pkg.outputs.name }}/pc4l --version
-          /tmp/smoke/${{ steps.pkg.outputs.name }}/pc4l-gui --help > /dev/null
+          /tmp/smoke/${{ steps.pkg.outputs.name }}/squigl-cli --version
+          /tmp/smoke/${{ steps.pkg.outputs.name }}/squigl --help > /dev/null
           APPIMAGE_EXTRACT_AND_RUN=1 "${{ steps.appimage.outputs.file }}" --help > /dev/null
 
       - uses: softprops/action-gh-release@v2

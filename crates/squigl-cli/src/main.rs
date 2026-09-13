@@ -11,7 +11,7 @@ use std::time::Duration;
 
 /// Stream an Android phone's camera to a Linux V4L2 device.
 #[derive(Parser, Debug)]
-#[command(name = "pc4l", version)]
+#[command(name = "squigl-cli", version)]
 struct Args {
     /// ADB serial of the device to use (autodetected if omitted and only one is attached).
     #[arg(long)]
@@ -334,7 +334,7 @@ fn enable_tcpip(serial: Option<&str>, port: u16) -> Result<()> {
         .context("switching the phone to TCP/IP ADB")?;
     println!("{address}");
     log::info!(
-        "phone is now in TCP/IP ADB mode; unplug USB if you like and run: pc4l --connect {address}"
+        "phone is now in TCP/IP ADB mode; unplug USB if you like and run: squigl-cli --connect {address}"
     );
     Ok(())
 }

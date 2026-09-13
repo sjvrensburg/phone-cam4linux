@@ -2,10 +2,10 @@
 //!
 //! The hundreds of megabytes of graphs are not embedded in the binary (that would
 //! relink them on every build and put them in git); each model is looked up, in
-//! order, in `$PC4L_MODEL_DIR/<name>/`, a `models/<name>/` directory next to the
+//! order, in `$SQUIGL_MODEL_DIR/<name>/`, a `models/<name>/` directory next to the
 //! AppImage (when running as one) or next to the executable (how a release tarball
 //! ships them), and
-//! `$XDG_CACHE_HOME/pc4l/models/<name>/`. If none has it, it is downloaded into the
+//! `$XDG_CACHE_HOME/squigl/models/<name>/`. If none has it, it is downloaded into the
 //! cache from a pinned Hugging Face revision, each file checked against the sha256
 //! recorded here before it is used.
 
@@ -101,7 +101,7 @@ pub const ALL: &[&ModelSpec] = &[&GLM_OCR, &DOC_LAYOUT];
 /// The directories a model named `name` is searched for in, in order.
 fn candidate_dirs(name: &str) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
-    if let Some(d) = std::env::var_os("PC4L_MODEL_DIR") {
+    if let Some(d) = std::env::var_os("SQUIGL_MODEL_DIR") {
         dirs.push(PathBuf::from(d).join(name));
     }
     // Inside an AppImage the executable's own directory is read-only; the models
@@ -127,7 +127,7 @@ fn cache_dir(name: &str) -> PathBuf {
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
         .unwrap_or_default();
-    base.join("pc4l").join("models").join(name)
+    base.join("squigl").join("models").join(name)
 }
 
 impl ModelSpec {
@@ -159,7 +159,7 @@ impl ModelSpec {
     }
 
     /// Downloads the model into `dir` (files already present at the right size are
-    /// kept), verifying every file's SHA-256. `pc4l-gui --fetch-model DIR` for
+    /// kept), verifying every file's SHA-256. `squigl --fetch-model DIR` for
     /// scripts and release packaging.
     pub fn download_into(&self, dir: &Path, progress: &dyn Fn(String)) -> Result<()> {
         log::info!(

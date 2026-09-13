@@ -309,7 +309,7 @@ impl LayoutService {
         let worker_state = Arc::clone(&self.state);
         let device = self.device;
         std::thread::Builder::new()
-            .name("pc4l-layout".into())
+            .name("squigl-layout".into())
             .spawn(move || {
                 let set = |s: String| {
                     *worker_state.lock().unwrap() = State::Preparing(s);
