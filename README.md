@@ -37,7 +37,8 @@ mirroring, audio, or input control.
 ## Requirements
 
 - `adb` on `PATH` (`android-tools` / `platform-tools`), with the phone's USB
-  debugging authorized.
+  debugging authorized (accept the RSA key prompt that appears on the phone the first
+  time you connect).
 - Android 12+ on the phone (camera-as-video-source requires it).
 - `v4l2loopback` kernel module installed (`v4l2loopback-dkms` on most distros).
   If the target `/dev/videoN` is missing, `squigl-cli` creates it via `pkexec` (which
@@ -49,6 +50,22 @@ mirroring, audio, or input control.
 - Optional, for the `ffmpeg` feature: libavcodec/libavutil development headers from a
   *full* FFmpeg (on Fedora that's RPM Fusion's `ffmpeg-devel`; `ffmpeg-free` lacks the
   native `h264` decoder).
+- Optional, for GPU acceleration of the GUI's built-in models: Vulkan drivers (e.g.
+  `mesa-vulkan-drivers`, or your GPU vendor's package). Not required -- without them
+  the models still work, just on the CPU (see Status/caveats).
+
+**On a machine you don't fully control** (a managed/corporate laptop), two things can
+block setup before you even reach the app, and are worth checking first:
+
+- **Secure Boot** rejects an unsigned, DKMS-built `v4l2loopback.ko` on most distros.
+  The package's install hook usually offers to enroll a MOK (`mokutil --import ...`,
+  confirmed with a password at the next boot); if that's locked down by policy, you'll
+  need IT to enroll it, install a distro that ships it pre-signed, or (if policy
+  allows) disable Secure Boot.
+- **No `sudo`/`pkexec`** blocks both the on-demand `pkexec` prompt and
+  `install-system-config.sh`. If you don't have either, ask an admin to run
+  `install-system-config.sh` once (it just drops two config files and reloads the
+  module) rather than trying to work around it.
 
 ## Install
 
@@ -245,6 +262,28 @@ being installed (`cargo install --path crates/squigl-cli [--features ffmpeg]`).
 
 Writes a synthetic cycling color-bar pattern instead of a real camera stream --
 exercises the loopback/format-negotiation/write path independently of ADB/hardware.
+
+## Troubleshooting
+
+- **`CAMERA_IN_USE`** (server fails immediately): the phone's own camera app is open
+  and holding the camera. Close it (`adb shell input keyevent KEYCODE_HOME` sends the
+  phone home) and retry.
+- **`adb devices` shows nothing, or `unauthorized`**: check the USB cable actually
+  carries data (some are charge-only), that USB debugging is on
+  (Settings -> About phone -> tap Build number 7x -> Developer options -> USB
+  debugging), and accept the RSA key prompt on the phone's screen -- it only appears
+  once per host and is easy to miss.
+- **`/dev/videoN` never appears** even after `install-system-config.sh` and a reboot:
+  `v4l2loopback` likely failed to load. `journalctl -k | grep -i v4l2loopback` (or
+  `dmesg`) usually shows why -- a Secure Boot signature rejection is the most common
+  cause (see Requirements above).
+- **The GUI's built-in models are slow / a message about the GPU being lost appears**:
+  this is the WebGPU (Vulkan) execution provider, still experimental in ONNX Runtime;
+  it falls back to the CPU automatically (both on missing Vulkan drivers and mid-run
+  device loss) -- expected, not a bug, see Status/caveats below for the specifics.
+- **"no transcription backends configured"**: `~/.config/squigl/gui.toml` is missing
+  or has no working `[[backends]]` entry; delete it to regenerate the defaults, or
+  check Settings (`ctrl+,`).
 
 ## Status / caveats
 

@@ -4,11 +4,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-A Rust workspace that exposes an Android phone's camera as a Linux V4L2 (`/dev/videoN`)
-webcam. The on-device capture/encode is **not** reimplemented: the real upstream
+**Squigl**: a Rust workspace built around using an Android phone as a Linux document
+camera with live handwriting OCR (`crates/squigl`, the GUI -- this is "the product").
+It also exposes the phone as a plain V4L2 (`/dev/videoN`) webcam (`crates/squigl-cli`,
+a headless CLI) and provides the shared pipeline both are built on (`phone-cam4linux`,
+unrenamed -- it's the plumbing: scrcpy protocol, H.264 decode, pixel conversion, V4L2
+sink). The on-device capture/encode is **not** reimplemented: the real upstream
 `scrcpy-server.jar` is fetched at build time, embedded, and pushed to the phone over
-ADB. Everything from the socket down (scrcpy's client protocol, H.264 decode, pixel
-conversion, V4L2 sink) is implemented here.
+ADB. Everything from the socket down is implemented here.
 
 ## Commands
 
